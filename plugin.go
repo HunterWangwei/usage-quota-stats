@@ -1,0 +1,394 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+const pluginID = "usage-quota-stats"
+
+type envelope struct {
+	OK     bool `json:"ok"`
+	Result any  `json:"result,omitempty"`
+	Error  any  `json:"error,omitempty"`
+}
+
+type lifecycleRequest struct {
+	ConfigYAML []byte `json:"config_yaml"`
+}
+
+type pluginConfig struct {
+	Currency string                 `yaml:"currency"`
+	DataFile string                 `yaml:"data-file"`
+	Prices   map[string]modelPrices `yaml:"prices"`
+}
+
+type modelPrices struct {
+	Input      float64 `yaml:"input" json:"input"`
+	Output     float64 `yaml:"output" json:"output"`
+	CacheRead  float64 `yaml:"cache-read" json:"cache_read"`
+	CacheWrite float64 `yaml:"cache-write" json:"cache_write"`
+}
+
+type usageRecord struct {
+	Provider    string      `json:"Provider"`
+	Model       string      `json:"Model"`
+	Alias       string      `json:"Alias"`
+	AuthID      string      `json:"AuthID"`
+	AuthIndex   string      `json:"AuthIndex"`
+	RequestedAt time.Time   `json:"RequestedAt"`
+	Failed      bool        `json:"Failed"`
+	Detail      usageDetail `json:"Detail"`
+}
+
+type usageDetail struct {
+	InputTokens         int64 `json:"InputTokens"`
+	OutputTokens        int64 `json:"OutputTokens"`
+	CachedTokens        int64 `json:"CachedTokens"`
+	CacheReadTokens     int64 `json:"CacheReadTokens"`
+	CacheCreationTokens int64 `json:"CacheCreationTokens"`
+}
+
+type storedUsage struct {
+	Provider            string    `json:"provider"`
+	Model               string    `json:"model"`
+	AuthID              string    `json:"auth_id"`
+	RequestedAt         time.Time `json:"requested_at"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	CacheReadTokens     int64     `json:"cache_read_tokens"`
+	CacheCreationTokens int64     `json:"cache_creation_tokens"`
+}
+
+type aggregateKey struct {
+	AuthID string
+	Model  string
+}
+
+type aggregate struct {
+	Provider            string
+	AuthID              string
+	Model               string
+	Requests            int64
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+}
+
+var state = struct {
+	sync.RWMutex
+	config   pluginConfig
+	dataFile string
+	rows     map[aggregateKey]*aggregate
+}{rows: make(map[aggregateKey]*aggregate)}
+
+func handleMethod(method string, request []byte) ([]byte, error) {
+	switch method {
+	case "plugin.register", "plugin.reconfigure":
+		var req lifecycleRequest
+		if len(request) > 0 {
+			if err := json.Unmarshal(request, &req); err != nil {
+				return nil, fmt.Errorf("decode lifecycle request: %w", err)
+			}
+		}
+		if err := applyConfig(req.ConfigYAML); err != nil {
+			return nil, err
+		}
+		return okEnvelope(map[string]any{
+			"schema_version": 1,
+			"metadata": map[string]any{
+				"Name":             "配置额度统计",
+				"Version":          "1.0.0",
+				"Author":           "CLIProxyAPI",
+				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
+				"ConfigFields": []map[string]any{
+					{"Name": "currency", "Type": "string", "Description": "显示货币，例如 USD 或 CNY。"},
+					{"Name": "data-file", "Type": "string", "Description": "使用记录 JSONL 文件路径。"},
+					{"Name": "prices", "Type": "object", "Description": "按模型填写每 100 万 token 的输入、输出、缓存读和缓存写价格。"},
+				},
+			},
+			"capabilities": map[string]any{"usage_plugin": true, "management_api": true},
+		})
+	case "usage.handle":
+		var record usageRecord
+		if err := json.Unmarshal(request, &record); err != nil {
+			return nil, fmt.Errorf("decode usage record: %w", err)
+		}
+		if !record.Failed {
+			if err := recordUsage(record); err != nil {
+				return nil, err
+			}
+		}
+		return okEnvelope(struct{}{})
+	case "management.register":
+		return okEnvelope(map[string]any{
+			"resources": []map[string]string{{
+				"Path": "/dashboard", "Menu": "配置额度统计", "Description": "按配置和模型查看 token、费用及缓存命中率。",
+			}},
+		})
+	case "management.handle":
+		body, err := renderDashboard()
+		if err != nil {
+			return nil, err
+		}
+		return okEnvelope(map[string]any{
+			"StatusCode": http.StatusOK,
+			"Headers":    map[string][]string{"Content-Type": {"text/html; charset=utf-8"}},
+			"Body":       body,
+		})
+	default:
+		return errorEnvelope("unknown_method", "unknown method: "+method), nil
+	}
+}
+
+func applyConfig(raw []byte) error {
+	cfg := pluginConfig{Currency: "USD", DataFile: "usage-quota-stats.jsonl", Prices: make(map[string]modelPrices)}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := yaml.Unmarshal(raw, &cfg); err != nil {
+			return fmt.Errorf("parse plugin config: %w", err)
+		}
+	}
+	if strings.TrimSpace(cfg.Currency) == "" {
+		cfg.Currency = "USD"
+	}
+	if strings.TrimSpace(cfg.DataFile) == "" {
+		cfg.DataFile = "usage-quota-stats.jsonl"
+	}
+	path, err := filepath.Abs(cfg.DataFile)
+	if err != nil {
+		return fmt.Errorf("resolve data file: %w", err)
+	}
+
+	state.Lock()
+	defer state.Unlock()
+	if state.dataFile != path {
+		rows, errLoad := loadUsage(path)
+		if errLoad != nil {
+			return errLoad
+		}
+		state.rows = rows
+		state.dataFile = path
+	}
+	state.config = cfg
+	return nil
+}
+
+func recordUsage(record usageRecord) error {
+	model := strings.TrimSpace(record.Model)
+	if model == "" {
+		model = strings.TrimSpace(record.Alias)
+	}
+	authID := strings.TrimSpace(record.AuthID)
+	if authID == "" {
+		authID = strings.TrimSpace(record.AuthIndex)
+	}
+	if authID == "" {
+		authID = "unknown"
+	}
+	cacheRead := record.Detail.CacheReadTokens
+	if cacheRead == 0 {
+		cacheRead = record.Detail.CachedTokens
+	}
+	item := storedUsage{
+		Provider: record.Provider, Model: model, AuthID: authID, RequestedAt: record.RequestedAt,
+		InputTokens: record.Detail.InputTokens, OutputTokens: record.Detail.OutputTokens,
+		CacheReadTokens: cacheRead, CacheCreationTokens: record.Detail.CacheCreationTokens,
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		return fmt.Errorf("encode usage record: %w", err)
+	}
+
+	state.Lock()
+	defer state.Unlock()
+	if errMkdir := os.MkdirAll(filepath.Dir(state.dataFile), 0o755); errMkdir != nil {
+		return fmt.Errorf("create usage data directory: %w", errMkdir)
+	}
+	file, errOpen := os.OpenFile(state.dataFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if errOpen != nil {
+		return fmt.Errorf("open usage data file: %w", errOpen)
+	}
+	defer func() { _ = file.Close() }()
+	if _, errWrite := file.Write(append(raw, '\n')); errWrite != nil {
+		return fmt.Errorf("append usage data: %w", errWrite)
+	}
+	addUsage(state.rows, item)
+	return nil
+}
+
+func loadUsage(path string) (map[aggregateKey]*aggregate, error) {
+	rows := make(map[aggregateKey]*aggregate)
+	file, errOpen := os.Open(path)
+	if os.IsNotExist(errOpen) {
+		return rows, nil
+	}
+	if errOpen != nil {
+		return nil, fmt.Errorf("open usage data file: %w", errOpen)
+	}
+	defer func() { _ = file.Close() }()
+	scanner := bufio.NewScanner(file)
+	buffer := make([]byte, 64*1024)
+	scanner.Buffer(buffer, 1024*1024)
+	line := 0
+	for scanner.Scan() {
+		line++
+		var item storedUsage
+		if err := json.Unmarshal(scanner.Bytes(), &item); err != nil {
+			return nil, fmt.Errorf("decode usage data line %d: %w", line, err)
+		}
+		addUsage(rows, item)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read usage data: %w", err)
+	}
+	return rows, nil
+}
+
+func addUsage(rows map[aggregateKey]*aggregate, item storedUsage) {
+	key := aggregateKey{AuthID: item.AuthID, Model: item.Model}
+	row := rows[key]
+	if row == nil {
+		row = &aggregate{Provider: item.Provider, AuthID: item.AuthID, Model: item.Model}
+		rows[key] = row
+	}
+	row.Requests++
+	row.InputTokens += item.InputTokens
+	row.OutputTokens += item.OutputTokens
+	row.CacheReadTokens += item.CacheReadTokens
+	row.CacheCreationTokens += item.CacheCreationTokens
+}
+
+type dashboardRow struct {
+	AuthID, Model, Requests, Input, Output, CacheRead, CacheWrite, HitRate, Cost, PriceState string
+}
+
+type dashboardData struct {
+	Currency, TotalCost, TotalRequests, OverallHitRate, DataFile string
+	Rows                                                         []dashboardRow
+	Prices                                                       []priceRow
+}
+
+type priceRow struct{ Model, Input, Output, CacheRead, CacheWrite string }
+
+func renderDashboard() ([]byte, error) {
+	state.RLock()
+	cfg := state.config
+	dataFile := state.dataFile
+	aggregates := make([]aggregate, 0, len(state.rows))
+	for _, row := range state.rows {
+		aggregates = append(aggregates, *row)
+	}
+	state.RUnlock()
+	sort.Slice(aggregates, func(i, j int) bool {
+		if aggregates[i].AuthID == aggregates[j].AuthID {
+			return aggregates[i].Model < aggregates[j].Model
+		}
+		return aggregates[i].AuthID < aggregates[j].AuthID
+	})
+	data := dashboardData{Currency: cfg.Currency, DataFile: dataFile}
+	var totalCost float64
+	var totalRequests, totalRead, totalEligible int64
+	for _, item := range aggregates {
+		price, priced := lookupPrice(cfg.Prices, item.Model)
+		regularInput := regularInputTokens(item.Provider, item.InputTokens, item.CacheReadTokens, item.CacheCreationTokens)
+		eligible := regularInput + item.CacheReadTokens + item.CacheCreationTokens
+		cost := (float64(regularInput)*price.Input + float64(item.OutputTokens)*price.Output + float64(item.CacheReadTokens)*price.CacheRead + float64(item.CacheCreationTokens)*price.CacheWrite) / 1_000_000
+		priceState := "已定价"
+		costText := fmt.Sprintf("%.6f", cost)
+		if !priced {
+			priceState, costText = "未定价", "—"
+		} else {
+			totalCost += cost
+		}
+		data.Rows = append(data.Rows, dashboardRow{
+			AuthID: item.AuthID, Model: item.Model, Requests: formatInt(item.Requests), Input: formatInt(regularInput), Output: formatInt(item.OutputTokens),
+			CacheRead: formatInt(item.CacheReadTokens), CacheWrite: formatInt(item.CacheCreationTokens), HitRate: formatRate(item.CacheReadTokens, eligible), Cost: costText, PriceState: priceState,
+		})
+		totalRequests += item.Requests
+		totalRead += item.CacheReadTokens
+		totalEligible += eligible
+	}
+	data.TotalCost = fmt.Sprintf("%.6f", totalCost)
+	data.TotalRequests = formatInt(totalRequests)
+	data.OverallHitRate = formatRate(totalRead, totalEligible)
+	models := make([]string, 0, len(cfg.Prices))
+	for model := range cfg.Prices {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	for _, model := range models {
+		price := cfg.Prices[model]
+		data.Prices = append(data.Prices, priceRow{model, formatPrice(price.Input), formatPrice(price.Output), formatPrice(price.CacheRead), formatPrice(price.CacheWrite)})
+	}
+	var out bytes.Buffer
+	if err := dashboardTemplate.Execute(&out, data); err != nil {
+		return nil, fmt.Errorf("render dashboard: %w", err)
+	}
+	return out.Bytes(), nil
+}
+
+func lookupPrice(prices map[string]modelPrices, model string) (modelPrices, bool) {
+	if price, ok := prices[model]; ok {
+		return price, true
+	}
+	bestPrefix := ""
+	var bestPrice modelPrices
+	for pattern, price := range prices {
+		prefix := strings.TrimSuffix(pattern, "*")
+		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(model, prefix) && len(prefix) > len(bestPrefix) {
+			bestPrefix = prefix
+			bestPrice = price
+		}
+	}
+	if bestPrefix != "" {
+		return bestPrice, true
+	}
+	return modelPrices{}, false
+}
+
+func regularInputTokens(provider string, input, cacheRead, cacheWrite int64) int64 {
+	provider = strings.ToLower(provider)
+	if strings.Contains(provider, "claude") || strings.Contains(provider, "anthropic") {
+		return max(input, 0)
+	}
+	return max(input-cacheRead-cacheWrite, 0)
+}
+
+func formatRate(hit, eligible int64) string {
+	if eligible <= 0 {
+		return "0.00%"
+	}
+	return fmt.Sprintf("%.2f%%", float64(hit)*100/float64(eligible))
+}
+
+func formatInt(value int64) string     { return fmt.Sprintf("%d", value) }
+func formatPrice(value float64) string { return fmt.Sprintf("%.6g", value) }
+
+func okEnvelope(result any) ([]byte, error) { return json.Marshal(envelope{OK: true, Result: result}) }
+func errorEnvelope(code, message string) []byte {
+	raw, _ := json.Marshal(envelope{OK: false, Error: map[string]string{"code": code, "message": message}})
+	return raw
+}
+
+var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>配置额度统计</title><style>
+:root{color-scheme:light dark;--bg:#f6f7fb;--card:#fff;--text:#172033;--muted:#667085;--line:#e5e7eb;--accent:#2563eb} @media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--line:#374151;--accent:#60a5fa}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.page{padding:24px;max-width:1600px;margin:auto}h1{margin:0 0 6px;font-size:25px}.hint{color:var(--muted);margin-bottom:20px}.cards{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px;margin-bottom:18px}.card,.panel{background:var(--card);border:1px solid var(--line);border-radius:12px}.card{padding:16px}.label{color:var(--muted)}.value{font-size:24px;font-weight:700;margin-top:5px}.panel{padding:16px;margin-top:16px;overflow:auto}h2{font-size:17px;margin:0 0 12px}table{border-collapse:collapse;width:100%;white-space:nowrap}th,td{text-align:right;padding:10px;border-bottom:1px solid var(--line)}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th{color:var(--muted);font-weight:600}.unpriced{color:#d97706}.empty{text-align:center!important;color:var(--muted);padding:28px}code{font-size:12px}@media(max-width:750px){.cards{grid-template-columns:1fr}.page{padding:14px}}
+</style></head><body><main class="page"><h1>配置额度统计</h1><div class="hint">价格单位：{{.Currency}} / 100 万 token。缓存命中率 = 缓存读取 ÷（普通输入 + 缓存读取 + 缓存写入）。</div>
+<section class="cards"><div class="card"><div class="label">已定价费用</div><div class="value">{{.Currency}} {{.TotalCost}}</div></div><div class="card"><div class="label">请求数</div><div class="value">{{.TotalRequests}}</div></div><div class="card"><div class="label">缓存命中率</div><div class="value">{{.OverallHitRate}}</div></div></section>
+<section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
+<section class="panel"><h2>当前模型价格</h2><table><thead><tr><th>模型（支持前缀 *）</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th></tr></thead><tbody>{{range .Prices}}<tr><td>{{.Model}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td></tr>{{else}}<tr><td colspan="5" class="empty">尚未配置价格，请在 config.yaml 的 plugins.configs.usage-quota-stats.prices 中填写。</td></tr>{{end}}</tbody></table><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main></body></html>`))

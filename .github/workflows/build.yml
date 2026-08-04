@@ -1,0 +1,64 @@
+name: Build native packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix
+        required: true
+        default: 1.0.0
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+            extension: so
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            extension: so
+          - runner: windows-2025
+            goos: windows
+            goarch: amd64
+            extension: dll
+          - runner: macos-15
+            goos: darwin
+            goarch: arm64
+            extension: dylib
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: Test
+        run: go test ./...
+      - name: Build
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          mkdir -p package
+          go build -buildmode=c-shared -o "package/usage-quota-stats.${{ matrix.extension }}" .
+          rm -f package/usage-quota-stats.h
+          cp README.md README_CN.md LICENSE package/
+      - name: Package
+        shell: bash
+        run: |
+          cd package
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            7z a "../usage-quota-stats_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" .
+          else
+            zip -r "../usage-quota-stats_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: usage-quota-stats_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: usage-quota-stats_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+          if-no-files-found: error
