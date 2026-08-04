@@ -111,7 +111,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.0.3",
+				"Version":          "1.0.4",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -423,5 +423,6 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 <section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
 <section class="panel"><h2>模型价格（可直接编辑）</h2><p class="hint">单位：{{.Currency}} / 100 万 Token。支持模型前缀，例如 <code>claude-*</code>。保存后写入数据文件旁的 <code>.prices.json</code>。</p><table id="prices"><thead><tr><th>模型（支持前缀 *）</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th></th></tr></thead><tbody>{{range .Prices}}<tr><td><input value="{{.Model}}"></td><td><input type="number" step="any" value="{{.Input}}"></td><td><input type="number" step="any" value="{{.Output}}"></td><td><input type="number" step="any" value="{{.CacheRead}}"></td><td><input type="number" step="any" value="{{.CacheWrite}}"></td><td><button type="button" onclick="this.closest('tr').remove()">删除</button></td></tr>{{end}}</tbody></table><button type="button" onclick="addPrice()">添加模型</button> <button type="button" onclick="savePrices()">保存价格</button><span id="saved"></span><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main><script>
 function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
-function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),m=i[0].value.trim();if(m)p[m]={input:+i[1].value||0,output:+i[2].value||0,cache_read:+i[3].value||0,cache_write:+i[4].value||0}});location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
+let pricesDirty=false;document.querySelector('#prices').addEventListener('input',()=>{pricesDirty=true});setInterval(()=>{if(!pricesDirty&&!document.querySelector('#prices input:focus'))location.reload()},5000);
+function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),m=i[0].value.trim();if(m)p[m]={input:+i[1].value||0,output:+i[2].value||0,cache_read:+i[3].value||0,cache_write:+i[4].value||0}});pricesDirty=false;location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
 </script></body></html>`))
