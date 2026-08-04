@@ -304,9 +304,14 @@ func addUsage(rows map[aggregateKey]*aggregate, item storedUsage) {
 type dashboardRow struct {
 	AuthID, Model, Requests, Input, Output, CacheRead, CacheWrite, HitRate, Cost, PriceState string
 }
+type dashboardGroup struct {
+	AuthID, Requests, Input, Output, CacheRead, CacheWrite, HitRate, Cost string
+	Rows                                                                  []dashboardRow
+}
 
 type dashboardData struct {
 	Currency, TotalCost, TotalRequests, OverallHitRate, DataFile string
+	Groups                                                       []dashboardGroup
 	Rows                                                         []dashboardRow
 	Prices                                                       []priceRow
 }
@@ -329,6 +334,7 @@ func renderDashboard() ([]byte, error) {
 		return aggregates[i].AuthID < aggregates[j].AuthID
 	})
 	data := dashboardData{Currency: cfg.Currency, DataFile: dataFile}
+	groupMap := make(map[string][]dashboardRow)
 	var totalCost float64
 	var totalRequests, totalRead, totalEligible int64
 	for _, item := range aggregates {
@@ -343,14 +349,35 @@ func renderDashboard() ([]byte, error) {
 		} else {
 			totalCost += cost
 		}
-		data.Rows = append(data.Rows, dashboardRow{
+		row := dashboardRow{
 			AuthID: item.AuthID, Model: item.Model, Requests: formatInt(item.Requests), Input: formatInt(regularInput), Output: formatInt(item.OutputTokens),
 			CacheRead: formatInt(item.CacheReadTokens), CacheWrite: formatInt(item.CacheCreationTokens), HitRate: formatRate(item.CacheReadTokens, eligible), Cost: costText, PriceState: priceState,
-		})
+		}
+		groupMap[item.AuthID] = append(groupMap[item.AuthID], row)
+		data.Rows = append(data.Rows, row)
 		totalRequests += item.Requests
 		totalRead += item.CacheReadTokens
 		totalEligible += eligible
 	}
+	for authID, rows := range groupMap {
+		group := dashboardGroup{AuthID: authID, Rows: rows}
+		for _, row := range rows {
+			group.Requests = formatInt(parseInt(group.Requests) + parseInt(row.Requests))
+			group.Input = formatInt(parseInt(group.Input) + parseInt(row.Input))
+			group.Output = formatInt(parseInt(group.Output) + parseInt(row.Output))
+			group.CacheRead = formatInt(parseInt(group.CacheRead) + parseInt(row.CacheRead))
+			group.CacheWrite = formatInt(parseInt(group.CacheWrite) + parseInt(row.CacheWrite))
+		}
+		group.HitRate = formatRate(parseInt(group.CacheRead), parseInt(group.Input)+parseInt(group.CacheRead)+parseInt(group.CacheWrite))
+		group.Cost = "0"
+		for _, row := range rows {
+			if row.PriceState != "未定价" {
+				group.Cost = fmt.Sprintf("%.6f", parseFloat(group.Cost)+parseFloat(row.Cost))
+			}
+		}
+		data.Groups = append(data.Groups, group)
+	}
+	sort.Slice(data.Groups, func(i, j int) bool { return parseFloat(data.Groups[i].Cost) > parseFloat(data.Groups[j].Cost) })
 	data.TotalCost = fmt.Sprintf("%.6f", totalCost)
 	data.TotalRequests = formatInt(totalRequests)
 	data.OverallHitRate = formatRate(totalRead, totalEligible)
@@ -405,6 +432,8 @@ func formatRate(hit, eligible int64) string {
 }
 
 func formatInt(value int64) string     { return fmt.Sprintf("%d", value) }
+func parseInt(value string) int64      { var n int64; _, _ = fmt.Sscan(value, &n); return n }
+func parseFloat(value string) float64  { var n float64; _, _ = fmt.Sscan(value, &n); return n }
 func formatPrice(value float64) string { return fmt.Sprintf("%.6g", value) }
 
 func okEnvelope(result any) ([]byte, error) { return json.Marshal(envelope{OK: true, Result: result}) }
@@ -425,4 +454,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
 let pricesDirty=false;document.querySelector('#prices').addEventListener('input',()=>{pricesDirty=true});setInterval(()=>{if(!pricesDirty&&!document.querySelector('#prices input:focus'))location.reload()},5000);
 function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),m=i[0].value.trim();if(m)p[m]={input:+i[1].value||0,output:+i[2].value||0,cache_read:+i[3].value||0,cache_write:+i[4].value||0}});pricesDirty=false;location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
+function buildCredentialGroups(){let panel=document.querySelector('.panel');if(!panel)return;let table=panel.querySelector('table');if(!table||!table.tBodies.length)return;let groups={};Array.from(table.tBodies[0].rows).forEach(r=>{let c=r.cells;if(c.length<9)return;let id=c[0].textContent.trim();(groups[id]??=[]).push(Array.from(c).slice(1).map(x=>x.textContent.trim()))});let wrap=document.createElement('div');wrap.id='credentialGroups';wrap.innerHTML='<div class="group-tools"><input id="groupSearch" placeholder="搜索凭证"><button onclick="setGroups(true)">全部展开</button><button onclick="setGroups(false)">全部收起</button></div>';Object.entries(groups).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([id,rows])=>{let d=document.createElement('details');d.className='credential';d.dataset.id=id;let sum=document.createElement('summary');sum.innerHTML='<strong>'+id+'</strong><span>'+rows.length+' 个模型</span>';d.append(sum);let t=document.createElement('table');t.innerHTML='<thead><tr><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用</th></tr></thead><tbody>'+rows.map(x=>'<tr>'+x.map(v=>'<td>'+v+'</td>').join('')+'</tr>').join('')+'</tbody>';d.append(t);wrap.append(d)});table.replaceWith(wrap.querySelector('#credentialGroups')||wrap);let s=document.querySelector('#groupSearch');if(s)s.oninput=()=>{let q=s.value.toLowerCase();document.querySelectorAll('.credential').forEach(d=>d.hidden=!d.dataset.id.toLowerCase().includes(q))}}
+function setGroups(open){document.querySelectorAll('.credential').forEach(d=>d.open=open)}
+buildCredentialGroups();
 </script></body></html>`))
