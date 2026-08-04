@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "plugins": [
+    {
+      "id": "usage-quota-stats",
+      "name": "Usage Quota Statistics",
+      "description": "Track token usage, estimated cost, and cache hit rate by credential configuration and model.",
+      "author": "HunterWangwei",
+      "version": "1.0.0",
+      "repository": "https://github.com/HunterWangwei/usage-quota-stats",
+      "homepage": "https://github.com/HunterWangwei/usage-quota-stats",
+      "license": "MIT",
+      "tags": ["usage", "billing", "cost", "cache", "statistics"],
+      "install": {
+        "type": "direct",
+        "artifacts": [
+          {
+            "goos": "linux",
+            "goarch": "amd64",
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.0/usage-quota-stats_1.0.0_linux_amd64.zip",
+            "sha256": "22f9f3933ee439796152e73dcc3957ac9365b48570059755f1a37fb00dac616c",
+            "size": 4865472
+          },
+          {
+            "goos": "linux",
+            "goarch": "arm64",
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.0/usage-quota-stats_1.0.0_linux_arm64.zip",
+            "sha256": "0a0111dfa0bb9b17ba025a21dd8aa8bbc583f5c37ec037780e49021bcbec86de",
+            "size": 4426617
+          },
+          {
+            "goos": "windows",
+            "goarch": "amd64",
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.0/usage-quota-stats_1.0.0_windows_amd64.zip",
+            "sha256": "7802f153c6aa0d2860825a2026090d5521caf30600c49e8db41ecbcf56876732",
+            "size": 4628819
+          },
+          {
+            "goos": "darwin",
+            "goarch": "arm64",
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.0/usage-quota-stats_1.0.0_darwin_arm64.zip",
+            "sha256": "cddce6e191acb4effe0bb922b679bdb726bec391d9ac83fe82635c19c7dbbeb8",
+            "size": 2501853
+          }
+        ]
+      }
+    }
+  ]
+}
