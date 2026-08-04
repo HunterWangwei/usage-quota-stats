@@ -140,6 +140,15 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			}},
 		})
 	case "management.handle":
+		var req struct {
+			Query map[string][]string `json:"Query"`
+		}
+		_ = json.Unmarshal(request, &req)
+		if values := req.Query["prices"]; len(values) > 0 {
+			if err := updatePrices(values[0]); err != nil {
+				return nil, err
+			}
+		}
 		body, err := renderDashboard()
 		if err != nil {
 			return nil, err
@@ -182,7 +191,28 @@ func applyConfig(raw []byte) error {
 		state.rows = rows
 		state.dataFile = path
 	}
+	if saved, errRead := os.ReadFile(path + ".prices.json"); errRead == nil {
+		_ = json.Unmarshal(saved, &cfg.Prices)
+	}
 	state.config = cfg
+	return nil
+}
+
+func updatePrices(raw string) error {
+	var prices map[string]modelPrices
+	if err := json.Unmarshal([]byte(raw), &prices); err != nil {
+		return fmt.Errorf("parse prices: %w", err)
+	}
+	state.Lock()
+	defer state.Unlock()
+	data, err := json.MarshalIndent(prices, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(state.dataFile+".prices.json", append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("save prices: %w", err)
+	}
+	state.config.Prices = prices
 	return nil
 }
 
@@ -391,4 +421,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 </style></head><body><main class="page"><h1>配置额度统计</h1><div class="hint">价格单位：{{.Currency}} / 100 万 token。缓存命中率 = 缓存读取 ÷（普通输入 + 缓存读取 + 缓存写入）。</div>
 <section class="cards"><div class="card"><div class="label">已定价费用</div><div class="value">{{.Currency}} {{.TotalCost}}</div></div><div class="card"><div class="label">请求数</div><div class="value">{{.TotalRequests}}</div></div><div class="card"><div class="label">缓存命中率</div><div class="value">{{.OverallHitRate}}</div></div></section>
 <section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
-<section class="panel"><h2>当前模型价格</h2><table><thead><tr><th>模型（支持前缀 *）</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th></tr></thead><tbody>{{range .Prices}}<tr><td>{{.Model}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td></tr>{{else}}<tr><td colspan="5" class="empty">尚未配置价格，请在 config.yaml 的 plugins.configs.usage-quota-stats.prices 中填写。</td></tr>{{end}}</tbody></table><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main></body></html>`))
+<section class="panel"><h2>模型价格（可直接编辑）</h2><p class="hint">单位：{{.Currency}} / 100 万 Token。支持模型前缀，例如 <code>claude-*</code>。保存后写入数据文件旁的 <code>.prices.json</code>。</p><table id="prices"><thead><tr><th>模型（支持前缀 *）</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th></th></tr></thead><tbody>{{range .Prices}}<tr><td><input value="{{.Model}}"></td><td><input type="number" step="any" value="{{.Input}}"></td><td><input type="number" step="any" value="{{.Output}}"></td><td><input type="number" step="any" value="{{.CacheRead}}"></td><td><input type="number" step="any" value="{{.CacheWrite}}"></td><td><button type="button" onclick="this.closest('tr').remove()">删除</button></td></tr>{{end}}</tbody></table><button type="button" onclick="addPrice()">添加模型</button> <button type="button" onclick="savePrices()">保存价格</button><span id="saved"></span><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main><script>
+function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
+function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),m=i[0].value.trim();if(m)p[m]={input:+i[1].value||0,output:+i[2].value||0,'cache-read':+i[3].value||0,'cache-write':+i[4].value||0}});location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
+</script></body></html>`))

@@ -3,8 +3,8 @@
   "plugins": [
     {
       "id": "usage-quota-stats",
-      "name": "Usage Quota Statistics",
-      "description": "Track token usage, estimated cost, and cache hit rate by credential configuration and model.",
+      "name": "配置额度统计",
+      "description": "按凭据配置和模型统计 Token、费用及缓存命中率，并支持在页面直接配置模型价格。",
       "author": "HunterWangwei",
       "version": "1.0.0",
       "repository": "https://github.com/HunterWangwei/usage-quota-stats",

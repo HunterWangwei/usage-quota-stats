@@ -1,23 +1,10 @@
-# CLIProxyAPI Usage Quota Statistics
+# CLIProxyAPI 配置额度统计插件
 
-[简体中文](README_CN.md) | English
+这是一个适用于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的原生插件：按凭据配置（`AuthID`）和模型统计输入、输出、缓存读写 Token、估算费用及缓存命中率，并在管理面板左侧增加“配置额度统计”页面。
 
-A native plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) that tracks token usage and estimated cost per credential configuration and model. It adds a dedicated **Usage Quota Statistics** page to the management panel sidebar.
+## 从插件商店安装
 
-## Features
-
-- Aggregates successful requests by credential (`AuthID`) and model.
-- Tracks regular input, output, cache-read, and cache-write tokens separately.
-- Calculates estimated cost from user-defined prices per one million tokens.
-- Supports exact model names and prefix patterns such as `claude-*`.
-- Calculates cache hit rate as `cache read / (regular input + cache read + cache write)`.
-- Handles the different cache-token accounting conventions used by OpenAI-compatible and Claude/Anthropic providers.
-- Persists usage locally as JSON Lines, so statistics survive server restarts.
-- Clearly marks models that do not have a configured price instead of treating them as free.
-
-## Install from the plugin store
-
-Add this registry to `config.yaml`:
+在 `config.yaml` 添加插件源：
 
 ```yaml
 plugins:
@@ -30,17 +17,18 @@ plugins:
       enabled: true
 ```
 
-Restart CLIProxyAPI, open the plugin store, install **Usage Quota Statistics**, and restart the server once more to load the native library.
+重启服务后打开插件商店，安装“配置额度统计”，再重启一次加载动态库。
 
-## Configure model prices
+## 在页面配置模型价格
 
-Prices use the configured currency per one million tokens. Replace the example zeroes with your actual prices:
+进入左侧“配置额度统计”页面，在“模型价格”区域点击“添加模型”，填写模型名及每 100 万 Token 的输入、输出、缓存读取、缓存写入价格，然后点击“保存价格”。价格会保存到统计数据文件旁的 `.prices.json`，重启后仍然有效。
+
+也可以在 `config.yaml` 中提供初始价格：
 
 ```yaml
 plugins:
   configs:
     usage-quota-stats:
-      enabled: true
       currency: USD
       data-file: "usage-quota-stats.jsonl"
       prices:
@@ -56,9 +44,11 @@ plugins:
           cache-write: 0
 ```
 
-Exact model names take precedence over patterns. When several patterns match, the longest prefix wins. Models without a matching price remain visible and are marked as unpriced.
+页面保存的价格优先于配置文件价格。精确模型名优先于前缀规则；多个前缀匹配时最长前缀优先。未定价模型仍会显示，但不计入费用合计。
 
-Relative `data-file` paths are resolved from the CLIProxyAPI working directory. For Docker deployments, persist both the plugin and usage-data paths:
+缓存命中率公式为：`缓存读取 ÷（普通输入 + 缓存读取 + 缓存写入）`。插件只保存凭据标识、模型名、时间和 Token 计数，不保存提示词、回复、API Key 或 OAuth Token。统计记录保存在 `data-file` 指定的 JSONL 文件中。
+
+## Docker 持久化
 
 ```yaml
 volumes:
@@ -66,35 +56,20 @@ volumes:
   - ./data:/app/data
 ```
 
-Then set `data-file: /app/data/usage-quota-stats.jsonl`.
+并将 `data-file` 设置为 `/app/data/usage-quota-stats.jsonl`。
 
-## Build from source
+## 手动构建
 
-Requirements:
-
-- Go 1.26 or newer
-- CGO enabled
-- A C compiler supported by the target platform
-
-Windows PowerShell:
+需要 Go 1.26+、CGO 和目标平台 C 编译器：
 
 ```powershell
 ./build.ps1
 ```
 
-Linux:
+或：
 
 ```sh
-chmod +x build.sh
 ./build.sh
 ```
 
-The output is written under `dist/<goos>/<goarch>/`.
-
-## Data and privacy
-
-The plugin stores credential identifiers, model names, timestamps, and token counters. It does not store prompts, responses, API keys, or OAuth access tokens. The JSONL data file is created with owner-only permissions where supported.
-
-## License
-
-[MIT](LICENSE)
+构建结果位于 `dist/<goos>/<goarch>/`。更多英文说明见 [README_CN.md](README_CN.md)（文件名沿用历史版本）。
