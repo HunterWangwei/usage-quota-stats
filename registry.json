@@ -6,7 +6,7 @@
       "name": "配置额度统计",
       "description": "按凭据配置和模型统计 Token、费用及缓存命中率，并支持在页面直接配置模型价格。",
       "author": "HunterWangwei",
-      "version": "1.0.12",
+      "version": "1.0.13",
       "repository": "https://github.com/HunterWangwei/usage-quota-stats",
       "homepage": "https://github.com/HunterWangwei/usage-quota-stats",
       "license": "MIT",
@@ -17,30 +17,30 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.12/usage-quota-stats_1.0.12_linux_amd64.zip",
-            "sha256": "65d42595c15ca27263e79c76a4b0a6ee5c22024d4eea25c843b5cf877664e85a",
-            "size": 4880311
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.13/usage-quota-stats_1.0.13_linux_amd64.zip",
+            "sha256": "25ec163d138a03e74569fc830bfd9baf727bf3f399c63f78b334fe83d6e07992",
+            "size": 4881326
           },
           {
             "goos": "linux",
             "goarch": "arm64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.12/usage-quota-stats_1.0.12_linux_arm64.zip",
-            "sha256": "90ed4dfbaa867b4f3bd8e1ee2cd35498eddc9cf371a48beeb0ada2d50cbdecc5",
-            "size": 4439496
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.13/usage-quota-stats_1.0.13_linux_arm64.zip",
+            "sha256": "473343b176688ec0e76106c474cdcd06fed46edf67b17408ff5dd3c7b7021a44",
+            "size": 4440006
           },
           {
             "goos": "windows",
             "goarch": "amd64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.12/usage-quota-stats_1.0.12_windows_amd64.zip",
-            "sha256": "7f826bf400ba149430f4ca083a5ab8b23d5b78126855401aa0e448324d05bdd7",
-            "size": 4640530
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.13/usage-quota-stats_1.0.13_windows_amd64.zip",
+            "sha256": "07f949a35273c7488c1b50d744c59cbcda6b5eaa8f2bdb627d216f1f60507f91",
+            "size": 4640781
           },
           {
             "goos": "darwin",
             "goarch": "arm64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.12/usage-quota-stats_1.0.12_darwin_arm64.zip",
-            "sha256": "d8cd54a0338efb0974dba1bb853af78456ea34d23fcdbbd980f416b60e4cb7bd",
-            "size": 2511342
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.0.13/usage-quota-stats_1.0.13_darwin_arm64.zip",
+            "sha256": "8623a8352a232dcd5b81e70463f84ea88d97cae3b148d2bde980815ff5f782d2",
+            "size": 2511040
           }
         ]
       }
