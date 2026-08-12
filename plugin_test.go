@@ -15,6 +15,25 @@ func TestRegularInputTokens(t *testing.T) {
 	}
 }
 
+func TestUsageChannelPrefersUsageMetadata(t *testing.T) {
+	tests := []struct {
+		provider string
+		authType string
+		authID   string
+		want     string
+	}{
+		{provider: "codex", authType: "oauth", authID: "custom.json", want: "codex"},
+		{provider: "xai", authType: "oauth", authID: "uuid.json", want: "xai"},
+		{provider: "antigravity", authType: "oauth", authID: "custom.json", want: "antigravity"},
+		{authID: "codex-account.json", want: "codex"},
+	}
+	for _, test := range tests {
+		if got := usageChannel(test.provider, test.authType, test.authID); got != test.want {
+			t.Fatalf("usageChannel(%q, %q, %q) = %q, want %q", test.provider, test.authType, test.authID, got, test.want)
+		}
+	}
+}
+
 func TestLookupPriceSupportsPrefix(t *testing.T) {
 	prices := map[string]modelPrices{"gpt-*": {Input: 1}, "gpt-5.*": {Input: 1.5}, "gpt-5.4": {Input: 2}}
 	if got, ok := lookupPrice(prices, "gpt-5.4"); !ok || got.Input != 2 {

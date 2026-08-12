@@ -44,6 +44,7 @@ type modelPrices struct {
 
 type usageRecord struct {
 	Provider    string      `json:"Provider"`
+	AuthType    string      `json:"AuthType"`
 	Model       string      `json:"Model"`
 	Alias       string      `json:"Alias"`
 	AuthID      string      `json:"AuthID"`
@@ -63,6 +64,7 @@ type usageDetail struct {
 
 type storedUsage struct {
 	Provider            string    `json:"provider"`
+	AuthType            string    `json:"auth_type,omitempty"`
 	Model               string    `json:"model"`
 	AuthID              string    `json:"auth_id"`
 	RequestedAt         time.Time `json:"requested_at"`
@@ -79,6 +81,7 @@ type aggregateKey struct {
 
 type aggregate struct {
 	Provider            string
+	AuthType            string
 	AuthID              string
 	Model               string
 	Requests            int64
@@ -111,7 +114,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.0.13",
+				"Version":          "1.0.14",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -233,7 +236,7 @@ func recordUsage(record usageRecord) error {
 		cacheRead = record.Detail.CachedTokens
 	}
 	item := storedUsage{
-		Provider: record.Provider, Model: model, AuthID: authID, RequestedAt: record.RequestedAt,
+		Provider: record.Provider, AuthType: record.AuthType, Model: model, AuthID: authID, RequestedAt: record.RequestedAt,
 		InputTokens: record.Detail.InputTokens, OutputTokens: record.Detail.OutputTokens,
 		CacheReadTokens: cacheRead, CacheCreationTokens: record.Detail.CacheCreationTokens,
 	}
@@ -291,10 +294,16 @@ func addUsage(rows map[aggregateKey]*aggregate, item storedUsage) {
 	key := aggregateKey{AuthID: item.AuthID, Model: item.Model}
 	row := rows[key]
 	if row == nil {
-		row = &aggregate{Provider: item.Provider, AuthID: item.AuthID, Model: item.Model}
+		row = &aggregate{Provider: item.Provider, AuthType: item.AuthType, AuthID: item.AuthID, Model: item.Model}
 		rows[key] = row
 	}
 	row.Requests++
+	if row.Provider == "" {
+		row.Provider = item.Provider
+	}
+	if row.AuthType == "" {
+		row.AuthType = item.AuthType
+	}
 	row.InputTokens += item.InputTokens
 	row.OutputTokens += item.OutputTokens
 	row.CacheReadTokens += item.CacheReadTokens
@@ -302,7 +311,7 @@ func addUsage(rows map[aggregateKey]*aggregate, item storedUsage) {
 }
 
 type dashboardRow struct {
-	AuthID, Model, Requests, Input, Output, CacheRead, CacheWrite, HitRate, Cost, PriceState string
+	AuthID, Channel, Model, Requests, Input, Output, CacheRead, CacheWrite, HitRate, Cost, PriceState string
 }
 type dashboardGroup struct {
 	AuthID, Requests, Input, Output, CacheRead, CacheWrite, HitRate, Cost string
@@ -350,7 +359,7 @@ func renderDashboard() ([]byte, error) {
 			totalCost += cost
 		}
 		row := dashboardRow{
-			AuthID: item.AuthID, Model: item.Model, Requests: formatInt(item.Requests), Input: formatInt(regularInput), Output: formatInt(item.OutputTokens),
+			AuthID: item.AuthID, Channel: usageChannel(item.Provider, item.AuthType, item.AuthID), Model: item.Model, Requests: formatInt(item.Requests), Input: formatInt(regularInput), Output: formatInt(item.OutputTokens),
 			CacheRead: formatInt(item.CacheReadTokens), CacheWrite: formatInt(item.CacheCreationTokens), HitRate: formatRate(item.CacheReadTokens, eligible), Cost: costText, PriceState: priceState,
 		}
 		groupMap[item.AuthID] = append(groupMap[item.AuthID], row)
@@ -424,6 +433,27 @@ func regularInputTokens(provider string, input, cacheRead, cacheWrite int64) int
 	return max(input-cacheRead-cacheWrite, 0)
 }
 
+func usageChannel(provider, authType, authID string) string {
+	value := strings.ToLower(strings.Join([]string{provider, authType}, " "))
+	switch {
+	case strings.Contains(value, "antigravity"):
+		return "antigravity"
+	case strings.Contains(value, "codex") || strings.Contains(value, "openai"):
+		return "codex"
+	case strings.Contains(value, "xai") || strings.Contains(value, "grok"):
+		return "xai"
+	}
+	authID = strings.ToLower(strings.TrimSpace(authID))
+	switch {
+	case strings.HasPrefix(authID, "codex-"):
+		return "codex"
+	case strings.HasPrefix(authID, "xai-"):
+		return "xai"
+	default:
+		return "antigravity"
+	}
+}
+
 func formatRate(hit, eligible int64) string {
 	if eligible <= 0 {
 		return "0.00%"
@@ -449,7 +479,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.page{padding:24px;max-width:1600px;margin:auto}h1{margin:0 0 6px;font-size:25px}.hint{color:var(--muted);margin-bottom:20px}.cards{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px;margin-bottom:18px}.card,.panel{background:var(--card);border:1px solid var(--line);border-radius:12px}.card{padding:16px}.label{color:var(--muted)}.value{font-size:24px;font-weight:700;margin-top:5px}.panel{padding:16px;margin-top:16px;overflow:auto}h2{font-size:17px;margin:0 0 12px}table{border-collapse:collapse;width:100%;white-space:nowrap}th,td{text-align:right;padding:10px;border-bottom:1px solid var(--line)}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th{color:var(--muted);font-weight:600}#prices th{text-align:center!important}.unpriced{color:#d97706}.empty{text-align:center!important;color:var(--muted);padding:28px}code{font-size:12px}input{width:100%;min-width:100px;height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text);font:inherit;outline:none;transition:border-color .15s,box-shadow .15s}input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}button{height:36px;padding:0 13px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font:inherit;cursor:pointer;transition:background .15s,border-color .15s}button:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--card))}#prices td:last-child{padding-left:4px}#saved{color:#16a34a;margin-left:8px}@media(max-width:750px){.cards{grid-template-columns:1fr}.page{padding:14px}}
 </style></head><body><main class="page"><h1>配置额度统计</h1><div class="hint">价格单位：{{.Currency}} / 100 万 token。缓存命中率 = 缓存读取 ÷（普通输入 + 缓存读取 + 缓存写入）。</div>
 <section class="cards"><div class="card"><div class="label">已定价费用</div><div class="value">{{.Currency}} {{.TotalCost}}</div></div><div class="card"><div class="label">请求数</div><div class="value">{{.TotalRequests}}</div></div><div class="card"><div class="label">缓存命中率</div><div class="value">{{.OverallHitRate}}</div></div></section>
-<section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
+<section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr data-channel="{{.Channel}}"><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
 <section class="panel"><h2>模型价格（可直接编辑）</h2><p class="hint">单位：{{.Currency}} / 100 万 Token。支持模型前缀，例如 <code>claude-*</code>。保存后写入数据文件旁的 <code>.prices.json</code>。</p><table id="prices"><thead><tr><th>模型（支持前缀 *）</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th></th></tr></thead><tbody>{{range .Prices}}<tr><td><input value="{{.Model}}"></td><td><input type="number" step="any" value="{{.Input}}"></td><td><input type="number" step="any" value="{{.Output}}"></td><td><input type="number" step="any" value="{{.CacheRead}}"></td><td><input type="number" step="any" value="{{.CacheWrite}}"></td><td><button type="button" onclick="this.closest('tr').remove()">删除</button></td></tr>{{end}}</tbody></table><button type="button" onclick="addPrice()">添加模型</button> <button type="button" onclick="savePrices()">保存价格</button><span id="saved"></span><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main><script>
 function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
 let pricesDirty=false;document.querySelector('#prices').addEventListener('input',()=>{pricesDirty=true});
@@ -458,10 +488,11 @@ function esc(v){return v.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt
 function closeUsageModal(){document.querySelectorAll('.usage-modal').forEach(m=>m.classList.remove('open'));localStorage.setItem('usage-quota-modal','')}
 function openUsageModal(id){closeUsageModal();let m=Array.from(document.querySelectorAll('.usage-modal')).find(x=>x.dataset.id===id);if(m){m.classList.add('open');localStorage.setItem('usage-quota-modal',id)}}
 function buildCredentialCards(){let panel=document.querySelector('.panel'),table=panel&&panel.querySelector('table');if(!table||!table.tBodies.length)return;let groups={};Array.from(table.tBodies[0].rows).forEach(r=>{let c=r.cells;if(c.length<9)return;let id=c[0].textContent.trim();(groups[id]??=[]).push(Array.from(c).slice(1).map(x=>x.textContent.trim()))});let wrap=document.createElement('div');wrap.id='credentialView';wrap.innerHTML='<input id="credentialSearch" placeholder="搜索凭证"> <div class="credential-grid"></div>';let grid=wrap.querySelector('.credential-grid');Object.entries(groups).map(([id,rows])=>{let req=rows.reduce((n,x)=>n+(+x[1]||0),0),read=rows.reduce((n,x)=>n+(+x[4]||0),0),eligible=rows.reduce((n,x)=>n+(+x[2]||0)+(+x[4]||0)+(+x[5]||0),0),cost=rows.reduce((n,x)=>n+(parseFloat(x[7])||0),0);return{id,rows,req,hit:eligible?read*100/eligible:0,cost}}).sort((a,b)=>b.cost-a.cost).forEach(g=>{let card=document.createElement('button');card.className='credential-card';card.dataset.id=g.id;card.innerHTML='<strong>'+esc(g.id)+'</strong><div><span>已使用金额<b>'+g.cost.toFixed(2)+'</b></span><span>请求数<b>'+g.req+'</b></span><span>缓存命中率<b>'+g.hit.toFixed(2)+'%</b></span></div><em>查看模型详情 →</em>';card.onclick=()=>openUsageModal(g.id);grid.append(card);let modal=document.createElement('div');modal.className='usage-modal';modal.dataset.id=g.id;modal.onclick=e=>{if(e.target===modal)closeUsageModal()};modal.innerHTML='<div class="modal-box"><div class="modal-head"><h2>'+esc(g.id)+'</h2><button onclick="closeUsageModal()">×</button></div><div class="modal-body"><table><thead><tr><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用</th></tr></thead><tbody>'+g.rows.map(x=>'<tr>'+x.map(v=>'<td>'+esc(v)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div></div>';document.body.append(modal)});table.replaceWith(wrap);let s=document.querySelector('#credentialSearch');s.oninput=()=>{let q=s.value.toLowerCase();document.querySelectorAll('.credential-card').forEach(c=>c.hidden=!c.dataset.id.toLowerCase().includes(q))};let active=localStorage.getItem('usage-quota-modal');if(active)openUsageModal(active)}
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeUsageModal()});document.head.insertAdjacentHTML('beforeend','<style>#credentialSearch{max-width:320px;margin-bottom:15px}.credential-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}.credential-card{height:auto;text-align:left;padding:17px;border-radius:12px}.credential-card strong{display:block;overflow:hidden;text-overflow:ellipsis;margin-bottom:15px}.credential-card div{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.credential-card span{color:var(--muted);font-size:12px}.credential-card b{display:block;color:var(--text);font-size:16px;margin-top:4px}.credential-card em{display:block;text-align:right;color:var(--accent);font-style:normal;margin-top:15px}.usage-modal{display:none;position:fixed;inset:0;background:#0008;z-index:99;padding:5vh 4vw}.usage-modal.open{display:flex;align-items:center;justify-content:center}.modal-box{background:var(--card);border-radius:14px;width:min(1200px,96vw);max-height:90vh;overflow:hidden;box-shadow:0 24px 70px #0006}.modal-head{display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line)}.modal-head h2{margin:0;overflow:hidden;text-overflow:ellipsis}.modal-head button{margin-left:auto;font-size:24px}.modal-body{overflow:auto;max-height:calc(90vh - 70px);padding:12px 20px 20px}@media(max-width:700px){.credential-card div{grid-template-columns:1fr}.usage-modal{padding:2vh 2vw}}</style>');buildCredentialCards();
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeUsageModal()});document.head.insertAdjacentHTML('beforeend','<style>#credentialSearch{max-width:320px;margin-bottom:15px}.credential-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}.credential-card{height:auto;text-align:left;padding:17px;border-radius:12px}.credential-card strong{display:block;overflow:hidden;text-overflow:ellipsis;margin-bottom:15px}.credential-card div{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.credential-card span{color:var(--muted);font-size:12px}.credential-card b{display:block;color:var(--text);font-size:16px;margin-top:4px}.credential-card em{display:block;text-align:right;color:var(--accent);font-style:normal;margin-top:15px}.usage-modal{display:none;position:fixed;inset:0;background:#0008;z-index:99;padding:5vh 4vw}.usage-modal.open{display:flex;align-items:center;justify-content:center}.modal-box{background:var(--card);border-radius:14px;width:min(1200px,96vw);max-height:90vh;overflow:hidden;box-shadow:0 24px 70px #0006}.modal-head{display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line)}.modal-head h2{margin:0;overflow:hidden;text-overflow:ellipsis}.modal-head button{margin-left:auto;font-size:24px}.modal-body{overflow:auto;max-height:calc(90vh - 70px);padding:12px 20px 20px}@media(max-width:700px){.credential-card div{grid-template-columns:1fr}.usage-modal{padding:2vh 2vw}}</style>');let usageChannels={};document.querySelectorAll('.panel table tbody tr[data-channel]').forEach(row=>{let id=row.cells[0]?.textContent.trim();if(id)usageChannels[id]=row.dataset.channel});buildCredentialCards();document.querySelectorAll('.credential-card').forEach(card=>card.dataset.channel=usageChannels[card.dataset.id]||'');
 document.head.insertAdjacentHTML('beforeend','<style>.credential-grid{gap:18px}.credential-card{position:relative;min-height:210px;padding:0!important;border:1px solid color-mix(in srgb,var(--accent) 16%,var(--line))!important;border-radius:16px!important;background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 5%,var(--card)),var(--card) 55%)!important;box-shadow:0 2px 8px #0f172a0a;overflow:hidden;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}.credential-card:before{content:"";position:absolute;inset:0 auto 0 0;width:4px;background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 45%,#8b5cf6))}.credential-card:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--accent) 42%,var(--line))!important;box-shadow:0 12px 28px #0f172a18}.credential-card>strong{display:flex!important;align-items:center;height:64px;margin:0!important;padding:0 20px 0 24px;border-bottom:1px solid var(--line);font-size:15px;min-width:0}.credential-card>strong:before{content:"";width:10px;height:10px;margin-right:10px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 4px #22c55e1f;flex:none}.credential-card .credential-email{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.credential-card>div{display:grid!important;grid-template-columns:1.35fr 1fr 1fr!important;gap:0!important;padding:18px 20px 14px 24px}.credential-card>div span{padding:0 12px;border-right:1px solid var(--line)}.credential-card>div span:first-child{padding-left:0}.credential-card>div span:last-child{border:0;padding-right:0}.credential-card>div b{font-size:17px!important;white-space:nowrap}.credential-card>div span:first-child b{color:var(--accent);font-size:19px!important}.credential-card>em{margin:0!important;padding:0 20px 16px 24px;font-size:13px;font-weight:600}.credential-card:hover>em{transform:translateX(2px)}@media(max-width:700px){.credential-card>div{grid-template-columns:1fr 1fr!important;row-gap:15px!important}.credential-card>div span{border:0!important;padding:0!important}}</style>');
 function credentialEmail(id){let name=id.replace(/\.(json|ya?ml)$/i,'').replace(/^codex-[a-f0-9]+-/i,'').replace(/^xai-/i,'').replace(/-pro$/i,'');let match=name.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,24}$/i);return match?match[0]:name}
 document.querySelectorAll('.credential-card').forEach(card=>{let email=credentialEmail(card.dataset.id),title=card.querySelector('strong');title.title=email;title.innerHTML='<span class="credential-email">'+esc(email)+'</span>'});
+let nativeCredentialChannel=credentialChannel;credentialChannel=function(id){let card=Array.from(document.querySelectorAll('.credential-card')).find(item=>item.dataset.id===id);return card&&card.dataset.channel?card.dataset.channel:nativeCredentialChannel(id)};
 let activeChannel='all';function credentialChannel(id){return /^codex-/i.test(id)?'codex':/^xai-/i.test(id)?'xai':'antigravity'}function applyCredentialFilters(){let q=(document.querySelector('#credentialSearch')?.value||'').toLowerCase();document.querySelectorAll('.credential-card').forEach(card=>{let channel=credentialChannel(card.dataset.id),email=credentialEmail(card.dataset.id).toLowerCase();card.hidden=!email.includes(q)||(activeChannel!=='all'&&channel!==activeChannel)})}let filterBar=document.createElement('div');filterBar.className='channel-filters';filterBar.innerHTML='<span>凭证渠道</span><button class="active" data-channel="all">全部</button><button data-channel="antigravity">Antigravity</button><button data-channel="codex">Codex</button><button data-channel="xai">xAI</button>';document.querySelector('#credentialView')?.prepend(filterBar);filterBar.querySelectorAll('button').forEach(button=>button.onclick=()=>{activeChannel=button.dataset.channel;filterBar.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===button));applyCredentialFilters()});let credentialSearch=document.querySelector('#credentialSearch');if(credentialSearch)credentialSearch.oninput=applyCredentialFilters;document.head.insertAdjacentHTML('beforeend','<style>.channel-filters{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}.channel-filters span{color:var(--muted);margin-right:4px}.channel-filters button{height:34px;border-radius:999px;padding:0 15px}.channel-filters button.active{color:#fff;border-color:var(--accent);background:var(--accent);box-shadow:0 4px 12px color-mix(in srgb,var(--accent) 24%,transparent)}</style>');
 filterBar.querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>localStorage.setItem('usage-quota-channel',button.dataset.channel)));let savedChannel=localStorage.getItem('usage-quota-channel')||'all',savedButton=filterBar.querySelector('[data-channel="'+savedChannel+'"]');if(savedButton)savedButton.click();
 let refreshing=false;async function refreshDashboard(){if(refreshing||pricesDirty||document.hidden)return;refreshing=true;try{let response=await fetch(location.pathname+'?dashboard_refresh='+Date.now(),{cache:'no-store'});if(!response.ok)return;let doc=new DOMParser().parseFromString(await response.text(),'text/html'),summary=doc.querySelector('.cards'),currentSummary=document.querySelector('.cards');if(summary&&currentSummary)currentSummary.innerHTML=summary.innerHTML;let table=doc.querySelector('.panel table');if(!table||!table.tBodies.length)return;let groups={};Array.from(table.tBodies[0].rows).forEach(row=>{let cells=row.cells;if(cells.length<9)return;let id=cells[0].textContent.trim();(groups[id]??=[]).push(Array.from(cells).slice(1).map(cell=>cell.textContent.trim()))});Object.entries(groups).forEach(([id,rows])=>{let card=Array.from(document.querySelectorAll('.credential-card')).find(item=>item.dataset.id===id);if(card){let req=rows.reduce((n,x)=>n+(+x[1]||0),0),read=rows.reduce((n,x)=>n+(+x[4]||0),0),eligible=rows.reduce((n,x)=>n+(+x[2]||0)+(+x[4]||0)+(+x[5]||0),0),cost=rows.reduce((n,x)=>n+(parseFloat(x[7])||0),0),values=card.querySelectorAll('b');if(values[0])values[0].textContent=cost.toFixed(2);if(values[1])values[1].textContent=req;if(values[2])values[2].textContent=(eligible?read*100/eligible:0).toFixed(2)+'%'}let modal=Array.from(document.querySelectorAll('.usage-modal')).find(item=>item.dataset.id===id),body=modal&&modal.querySelector('tbody');if(body)body.innerHTML=rows.map(x=>'<tr>'+x.map(v=>'<td>'+esc(v)+'</td>').join('')+'</tr>').join('')});applyCredentialFilters()}catch(error){}finally{refreshing=false}}setInterval(refreshDashboard,5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshDashboard()});
