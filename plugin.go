@@ -36,10 +36,13 @@ type pluginConfig struct {
 }
 
 type modelPrices struct {
+	Mode       string  `yaml:"mode" json:"mode"` // token, request, second
 	Input      float64 `yaml:"input" json:"input"`
 	Output     float64 `yaml:"output" json:"output"`
 	CacheRead  float64 `yaml:"cache-read" json:"cache_read"`
 	CacheWrite float64 `yaml:"cache-write" json:"cache_write"`
+	Request    float64 `yaml:"request" json:"request"`
+	Second     float64 `yaml:"second" json:"second"`
 }
 
 type usageRecord struct {
@@ -114,7 +117,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.0.14",
+				"Version":          "1.0.15",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -325,7 +328,7 @@ type dashboardData struct {
 	Prices                                                       []priceRow
 }
 
-type priceRow struct{ Model, Input, Output, CacheRead, CacheWrite string }
+type priceRow struct{ Model, Mode, Input, Output, CacheRead, CacheWrite, Request, Second string }
 
 func renderDashboard() ([]byte, error) {
 	state.RLock()
@@ -350,7 +353,7 @@ func renderDashboard() ([]byte, error) {
 		price, priced := lookupPrice(cfg.Prices, item.Model)
 		regularInput := regularInputTokens(item.Provider, item.InputTokens, item.CacheReadTokens, item.CacheCreationTokens)
 		eligible := regularInput + item.CacheReadTokens + item.CacheCreationTokens
-		cost := (float64(regularInput)*price.Input + float64(item.OutputTokens)*price.Output + float64(item.CacheReadTokens)*price.CacheRead + float64(item.CacheCreationTokens)*price.CacheWrite) / 1_000_000
+		cost := calculateCost(price, item.Requests, regularInput, item.OutputTokens, item.CacheReadTokens, item.CacheCreationTokens)
 		priceState := "已定价"
 		costText := fmt.Sprintf("%.6f", cost)
 		if !priced {
@@ -390,14 +393,22 @@ func renderDashboard() ([]byte, error) {
 	data.TotalCost = fmt.Sprintf("%.6f", totalCost)
 	data.TotalRequests = formatInt(totalRequests)
 	data.OverallHitRate = formatRate(totalRead, totalEligible)
-	models := make([]string, 0, len(cfg.Prices))
+	models := make([]string, 0, len(cfg.Prices)+len(aggregates))
+	seen := make(map[string]bool, len(cfg.Prices))
 	for model := range cfg.Prices {
 		models = append(models, model)
+		seen[model] = true
+	}
+	for _, item := range aggregates {
+		if !seen[item.Model] {
+			models = append(models, item.Model)
+			seen[item.Model] = true
+		}
 	}
 	sort.Strings(models)
 	for _, model := range models {
 		price := cfg.Prices[model]
-		data.Prices = append(data.Prices, priceRow{model, formatPrice(price.Input), formatPrice(price.Output), formatPrice(price.CacheRead), formatPrice(price.CacheWrite)})
+		data.Prices = append(data.Prices, priceRow{model, price.Mode, formatPrice(price.Input), formatPrice(price.Output), formatPrice(price.CacheRead), formatPrice(price.CacheWrite), formatPrice(price.Request), formatPrice(price.Second)})
 	}
 	var out bytes.Buffer
 	if err := dashboardTemplate.Execute(&out, data); err != nil {
@@ -423,6 +434,17 @@ func lookupPrice(prices map[string]modelPrices, model string) (modelPrices, bool
 		return bestPrice, true
 	}
 	return modelPrices{}, false
+}
+
+func calculateCost(price modelPrices, requests, input, output, cacheRead, cacheWrite int64) float64 {
+	switch strings.ToLower(strings.TrimSpace(price.Mode)) {
+	case "request", "image", "image-request":
+		return float64(requests) * price.Request
+	case "second", "seconds", "video":
+		return 0 // Duration is not exposed by the current UsageRecord ABI.
+	default:
+		return (float64(input)*price.Input + float64(output)*price.Output + float64(cacheRead)*price.CacheRead + float64(cacheWrite)*price.CacheWrite) / 1_000_000
+	}
 }
 
 func regularInputTokens(provider string, input, cacheRead, cacheWrite int64) int64 {
@@ -480,10 +502,10 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 </style></head><body><main class="page"><h1>配置额度统计</h1><div class="hint">价格单位：{{.Currency}} / 100 万 token。缓存命中率 = 缓存读取 ÷（普通输入 + 缓存读取 + 缓存写入）。</div>
 <section class="cards"><div class="card"><div class="label">已定价费用</div><div class="value">{{.Currency}} {{.TotalCost}}</div></div><div class="card"><div class="label">请求数</div><div class="value">{{.TotalRequests}}</div></div><div class="card"><div class="label">缓存命中率</div><div class="value">{{.OverallHitRate}}</div></div></section>
 <section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr data-channel="{{.Channel}}"><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
-<section class="panel"><h2>模型价格（可直接编辑）</h2><p class="hint">单位：{{.Currency}} / 100 万 Token。支持模型前缀，例如 <code>claude-*</code>。保存后写入数据文件旁的 <code>.prices.json</code>。</p><table id="prices"><thead><tr><th>模型（支持前缀 *）</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th></th></tr></thead><tbody>{{range .Prices}}<tr><td><input value="{{.Model}}"></td><td><input type="number" step="any" value="{{.Input}}"></td><td><input type="number" step="any" value="{{.Output}}"></td><td><input type="number" step="any" value="{{.CacheRead}}"></td><td><input type="number" step="any" value="{{.CacheWrite}}"></td><td><button type="button" onclick="this.closest('tr').remove()">删除</button></td></tr>{{end}}</tbody></table><button type="button" onclick="addPrice()">添加模型</button> <button type="button" onclick="savePrices()">保存价格</button><span id="saved"></span><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main><script>
-function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
+<section class="panel"><h2>模型价格（可直接编辑）</h2><p class="hint">Token 模式单位：{{.Currency}} / 100 万 Token；每次/张、每秒模式分别按请求（图片）或时长计费。未配置但已产生用量的模型也会自动列出。</p><table id="prices"><thead><tr><th>模型（支持前缀 *）</th><th>模式</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>每次/张</th><th>每秒</th><th></th></tr></thead><tbody>{{range .Prices}}<tr><td><input value="{{.Model}}"></td><td><select><option value="token" {{if eq .Mode "request"}}{{else if eq .Mode "second"}}{{else}}selected{{end}}>Token</option><option value="request" {{if eq .Mode "request"}}selected{{end}}>每次/张</option><option value="second" {{if eq .Mode "second"}}selected{{end}}>每秒</option></select></td><td><input type="number" step="any" value="{{.Input}}"></td><td><input type="number" step="any" value="{{.Output}}"></td><td><input type="number" step="any" value="{{.CacheRead}}"></td><td><input type="number" step="any" value="{{.CacheWrite}}"></td><td><input type="number" step="any" value="{{.Request}}"></td><td><input type="number" step="any" value="{{.Second}}"></td><td><button type="button" onclick="this.closest('tr').remove()">删除</button></td></tr>{{end}}</tbody></table><button type="button" onclick="addPrice()">添加模型</button> <button type="button" onclick="savePrices()">保存价格</button><span id="saved"></span><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main><script>
+function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><select><option value="token" selected>Token</option><option value="request">每次/张</option><option value="second">每秒</option></select></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
 let pricesDirty=false;document.querySelector('#prices').addEventListener('input',()=>{pricesDirty=true});
-function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),m=i[0].value.trim();if(m)p[m]={input:+i[1].value||0,output:+i[2].value||0,cache_read:+i[3].value||0,cache_write:+i[4].value||0}});pricesDirty=false;location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
+function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),s=r.querySelector('select'),m=i[0].value.trim();if(m)p[m]={mode:s?s.value:'token',input:+i[1].value||0,output:+i[2].value||0,cache_read:+i[3].value||0,cache_write:+i[4].value||0,request:+i[5].value||0,second:+i[6].value||0}});pricesDirty=false;location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
 function esc(v){return v.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function closeUsageModal(){document.querySelectorAll('.usage-modal').forEach(m=>m.classList.remove('open'));localStorage.setItem('usage-quota-modal','')}
 function openUsageModal(id){closeUsageModal();let m=Array.from(document.querySelectorAll('.usage-modal')).find(x=>x.dataset.id===id);if(m){m.classList.add('open');localStorage.setItem('usage-quota-modal',id)}}
