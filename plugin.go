@@ -101,7 +101,17 @@ var state = struct {
 	rows     map[aggregateKey]*aggregate
 }{rows: make(map[aggregateKey]*aggregate)}
 
-func handleMethod(method string, request []byte) ([]byte, error) {
+type hostCaller func(method string, payload []byte) ([]byte, error)
+
+type authFileEntry struct {
+	ID        string `json:"id"`
+	AuthIndex string `json:"auth_index"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Provider  string `json:"provider"`
+}
+
+func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, error) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		var req lifecycleRequest
@@ -117,7 +127,7 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.0.17",
+				"Version":          "1.0.18",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -155,6 +165,9 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 				return nil, err
 			}
 		}
+		if len(caller) > 0 {
+			refreshAuthChannels(caller[0])
+		}
 		body, err := renderDashboard()
 		if err != nil {
 			return nil, err
@@ -167,6 +180,42 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
+}
+
+var authChannels = struct {
+	sync.RWMutex
+	byID map[string]string
+}{byID: make(map[string]string)}
+
+func refreshAuthChannels(caller hostCaller) {
+	if caller == nil {
+		return
+	}
+	raw, err := caller("host.auth.list", []byte(`{}`))
+	if err != nil {
+		return
+	}
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Files []authFileEntry `json:"files"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &env) != nil || !env.OK {
+		return
+	}
+	m := make(map[string]string)
+	for _, e := range env.Result.Files {
+		channel := usageChannel(e.Provider, e.Type, e.ID+" "+e.Name)
+		for _, key := range []string{e.ID, e.AuthIndex, e.Name} {
+			if strings.TrimSpace(key) != "" {
+				m[key] = channel
+			}
+		}
+	}
+	authChannels.Lock()
+	authChannels.byID = m
+	authChannels.Unlock()
 }
 
 func applyConfig(raw []byte) error {
@@ -362,7 +411,7 @@ func renderDashboard() ([]byte, error) {
 			totalCost += cost
 		}
 		row := dashboardRow{
-			AuthID: item.AuthID, Channel: usageChannel(item.Provider, item.AuthType, item.AuthID), Model: item.Model, Requests: formatInt(item.Requests), Input: formatInt(regularInput), Output: formatInt(item.OutputTokens),
+			AuthID: item.AuthID, Channel: channelForAuth(item.Provider, item.AuthType, item.AuthID), Model: item.Model, Requests: formatInt(item.Requests), Input: formatInt(regularInput), Output: formatInt(item.OutputTokens),
 			CacheRead: formatInt(item.CacheReadTokens), CacheWrite: formatInt(item.CacheCreationTokens), HitRate: formatRate(item.CacheReadTokens, eligible), Cost: costText, PriceState: priceState,
 		}
 		groupMap[item.AuthID] = append(groupMap[item.AuthID], row)
@@ -479,6 +528,16 @@ func usageChannel(provider, authType, authID string) string {
 	default:
 		return "antigravity"
 	}
+}
+
+func channelForAuth(provider, authType, authID string) string {
+	authChannels.RLock()
+	channel := authChannels.byID[authID]
+	authChannels.RUnlock()
+	if channel != "" {
+		return channel
+	}
+	return usageChannel(provider, authType, authID)
 }
 
 func formatRate(hit, eligible int64) string {

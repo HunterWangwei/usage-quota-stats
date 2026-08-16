@@ -12,6 +12,15 @@ typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*
 typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
 typedef void (*cliproxy_plugin_shutdown_fn)(void);
 typedef struct { uint32_t abi_version; cliproxy_plugin_call_fn call; cliproxy_plugin_free_fn free_buffer; cliproxy_plugin_shutdown_fn shutdown; } cliproxy_plugin_api;
+static const cliproxy_host_api* stored_host;
+static void store_host_api(const cliproxy_host_api* host) { stored_host = host; }
+static int call_host_api(const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+    if (stored_host == NULL || stored_host->call == NULL) return 1;
+    return stored_host->call(stored_host->host_ctx, method, request, request_len, response);
+}
+static void free_host_buffer(void* ptr, size_t len) {
+    if (stored_host != NULL && stored_host->free_buffer != NULL && ptr != NULL) stored_host->free_buffer(ptr, len);
+}
 
 extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
 extern void cliproxyPluginFree(void*, size_t);
@@ -26,16 +35,20 @@ static void set_plugin_api(cliproxy_plugin_api* plugin) {
 */
 import "C"
 
-import "unsafe"
+import (
+	"fmt"
+	"unsafe"
+)
 
 func main() {}
 
 //export cliproxy_plugin_init
-func cliproxy_plugin_init(_ *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
+func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
 		return 1
 	}
 	C.set_plugin_api(plugin)
+	C.store_host_api(host)
 	return 0
 }
 
@@ -53,13 +66,29 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	if request != nil && requestLen > 0 {
 		payload = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
-	raw, err := handleMethod(C.GoString(method), payload)
+	raw, err := handleMethod(C.GoString(method), payload, callHost)
 	if err != nil {
 		writeResponse(response, errorEnvelope("plugin_error", err.Error()))
 		return 1
 	}
 	writeResponse(response, raw)
 	return 0
+}
+
+func callHost(method string, payload []byte) ([]byte, error) {
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+	var response C.cliproxy_buffer
+	var request *C.uint8_t
+	if len(payload) > 0 {
+		request = (*C.uint8_t)(C.CBytes(payload))
+		defer C.free(unsafe.Pointer(request))
+	}
+	if C.call_host_api(cMethod, request, C.size_t(len(payload)), &response) != 0 || response.ptr == nil || response.len == 0 {
+		return nil, fmt.Errorf("host callback failed")
+	}
+	defer C.free_host_buffer(response.ptr, response.len)
+	return C.GoBytes(response.ptr, C.int(response.len)), nil
 }
 
 //export cliproxyPluginFree
