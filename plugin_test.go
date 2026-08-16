@@ -27,6 +27,7 @@ func TestUsageChannelPrefersUsageMetadata(t *testing.T) {
 		{provider: "antigravity", authType: "oauth", authID: "custom.json", want: "antigravity"},
 		{provider: "gemini", authType: "gemini-cli", authID: "custom.json", want: "gemini"},
 		{authID: "gemini-cli-account.json", want: "gemini"},
+		{authID: "expodev0-gmail.com-gemini-cli.json", want: "gemini"},
 		{authID: "codex-account.json", want: "codex"},
 	}
 	for _, test := range tests {
