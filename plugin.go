@@ -160,9 +160,16 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			Query map[string][]string `json:"Query"`
 		}
 		_ = json.Unmarshal(request, &req)
+		if values := req.Query["prices_parse"]; len(values) > 0 {
+			prices, errParse := parseImportedPrices(values[0])
+			if errParse != nil {
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": errParse.Error()})
+			}
+			return jsonResponse(http.StatusOK, map[string]any{"prices": prices})
+		}
 		if values := req.Query["prices"]; len(values) > 0 {
 			if err := updatePrices(values[0]); err != nil {
-				return nil, err
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 			}
 		}
 		if len(caller) > 0 {
@@ -258,6 +265,21 @@ func updatePrices(raw string) error {
 	if err := json.Unmarshal([]byte(raw), &prices); err != nil {
 		return fmt.Errorf("parse prices: %w", err)
 	}
+	cleaned := make(map[string]modelPrices, len(prices))
+	for model, price := range prices {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		for _, value := range []float64{price.Input, price.Output, price.CacheRead, price.CacheWrite, price.Request, price.Second} {
+			if value < 0 {
+				return fmt.Errorf("price for %s must not be negative", model)
+			}
+		}
+		price.Mode = normalizeMode(price.Mode)
+		cleaned[model] = price
+	}
+	prices = cleaned
 	state.Lock()
 	defer state.Unlock()
 	data, err := json.MarshalIndent(prices, "", "  ")
@@ -269,6 +291,98 @@ func updatePrices(raw string) error {
 	}
 	state.config.Prices = prices
 	return nil
+}
+
+// parseImportedPrices accepts the exported JSON, a bare YAML/JSON price map, or a pasted config.yaml fragment
+// (plugins.configs.usage-quota-stats.prices). Field names may use "cache-read" or "cache_read".
+func parseImportedPrices(text string) (map[string]modelPrices, error) {
+	var root any
+	if err := yaml.Unmarshal([]byte(text), &root); err != nil {
+		return nil, fmt.Errorf("无法解析导入内容：%w", err)
+	}
+	for _, path := range [][]string{{"plugins", "configs", pluginID, "prices"}, {"configs", pluginID, "prices"}, {pluginID, "prices"}, {"prices"}} {
+		if node, ok := lookupNode(root, path); ok {
+			root = node
+			break
+		}
+	}
+	entries, ok := root.(map[string]any)
+	if !ok || len(entries) == 0 {
+		return nil, fmt.Errorf("导入内容里没有找到模型价格")
+	}
+	prices := make(map[string]modelPrices, len(entries))
+	for model, rawFields := range entries {
+		fields, ok := rawFields.(map[string]any)
+		model = strings.TrimSpace(model)
+		if !ok || model == "" {
+			return nil, fmt.Errorf("模型 %q 的价格格式不正确", model)
+		}
+		var price modelPrices
+		for key, value := range fields {
+			key = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(key)), "_", "-")
+			if key == "mode" {
+				price.Mode = fmt.Sprint(value)
+				continue
+			}
+			number, okNumber := toFloat(value)
+			if !okNumber || number < 0 {
+				return nil, fmt.Errorf("模型 %s 的 %s 不是有效的非负数", model, key)
+			}
+			switch key {
+			case "input":
+				price.Input = number
+			case "output":
+				price.Output = number
+			case "cache-read":
+				price.CacheRead = number
+			case "cache-write":
+				price.CacheWrite = number
+			case "request":
+				price.Request = number
+			case "second":
+				price.Second = number
+			}
+		}
+		price.Mode = normalizeMode(price.Mode)
+		prices[model] = price
+	}
+	return prices, nil
+}
+
+func lookupNode(root any, path []string) (any, bool) {
+	node := root
+	for _, key := range path {
+		m, ok := node.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if node, ok = m[key]; !ok {
+			return nil, false
+		}
+	}
+	return node, true
+}
+
+func toFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case float64:
+		return v, true
+	case string:
+		var n float64
+		if _, err := fmt.Sscan(strings.TrimSpace(v), &n); err != nil {
+			return 0, false
+		}
+		return n, true
+	case nil:
+		return 0, true
+	}
+	return 0, false
 }
 
 func recordUsage(record usageRecord) error {
@@ -375,9 +489,29 @@ type dashboardData struct {
 	Groups                                                       []dashboardGroup
 	Rows                                                         []dashboardRow
 	Prices                                                       []priceRow
+	Unpriced                                                     []unpricedRow
+	EmptyPrice                                                   priceRow
 }
 
-type priceRow struct{ Model, Mode, Input, Output, CacheRead, CacheWrite, Request, Second string }
+type priceRow struct {
+	Model, Mode, Input, Output, CacheRead, CacheWrite, Request, Second string
+	Matches                                                            []priceMatch
+	ShownMatches                                                       []priceMatch
+	HiddenMatches                                                      int
+	MatchTitle                                                         string
+	MatchRequests                                                      int64
+}
+
+type priceMatch struct {
+	Model    string
+	Requests int64
+}
+
+type unpricedRow struct {
+	Model    string
+	Requests int64
+	Tokens   int64
+}
 
 func renderDashboard() ([]byte, error) {
 	state.RLock()
@@ -394,7 +528,7 @@ func renderDashboard() ([]byte, error) {
 		}
 		return aggregates[i].AuthID < aggregates[j].AuthID
 	})
-	data := dashboardData{Currency: cfg.Currency, DataFile: dataFile}
+	data := dashboardData{Currency: cfg.Currency, DataFile: dataFile, EmptyPrice: priceRow{Mode: "token", Input: "0", Output: "0", CacheRead: "0", CacheWrite: "0", Request: "0", Second: "0"}}
 	groupMap := make(map[string][]dashboardRow)
 	var totalCost float64
 	var totalRequests, totalRead, totalEligible int64
@@ -442,23 +576,62 @@ func renderDashboard() ([]byte, error) {
 	data.TotalCost = fmt.Sprintf("%.6f", totalCost)
 	data.TotalRequests = formatInt(totalRequests)
 	data.OverallHitRate = formatRate(totalRead, totalEligible)
-	models := make([]string, 0, len(cfg.Prices)+len(aggregates))
-	seen := make(map[string]bool, len(cfg.Prices))
+	// Configured rules list the used models they cover; used models that match no rule are listed separately
+	// so they are never saved as zero-priced exact rules that would shadow prefix rules.
+	matches := make(map[string]map[string]int64, len(cfg.Prices))
+	unpriced := make(map[string]*unpricedRow)
+	for _, item := range aggregates {
+		if pattern, ok := matchPattern(cfg.Prices, item.Model); ok {
+			if matches[pattern] == nil {
+				matches[pattern] = make(map[string]int64)
+			}
+			matches[pattern][item.Model] += item.Requests
+			continue
+		}
+		row := unpriced[item.Model]
+		if row == nil {
+			row = &unpricedRow{Model: item.Model}
+			unpriced[item.Model] = row
+		}
+		row.Requests += item.Requests
+		row.Tokens += item.InputTokens + item.OutputTokens + item.CacheReadTokens + item.CacheCreationTokens
+	}
+	models := make([]string, 0, len(cfg.Prices))
 	for model := range cfg.Prices {
 		models = append(models, model)
-		seen[model] = true
-	}
-	for _, item := range aggregates {
-		if !seen[item.Model] {
-			models = append(models, item.Model)
-			seen[item.Model] = true
-		}
 	}
 	sort.Strings(models)
 	for _, model := range models {
 		price := cfg.Prices[model]
-		data.Prices = append(data.Prices, priceRow{model, price.Mode, formatPrice(price.Input), formatPrice(price.Output), formatPrice(price.CacheRead), formatPrice(price.CacheWrite), formatPrice(price.Request), formatPrice(price.Second)})
+		row := priceRow{Model: model, Mode: normalizeMode(price.Mode), Input: formatPrice(price.Input), Output: formatPrice(price.Output), CacheRead: formatPrice(price.CacheRead), CacheWrite: formatPrice(price.CacheWrite), Request: formatPrice(price.Request), Second: formatPrice(price.Second)}
+		for matched, requests := range matches[model] {
+			row.Matches = append(row.Matches, priceMatch{Model: matched, Requests: requests})
+			row.MatchRequests += requests
+		}
+		sort.Slice(row.Matches, func(i, j int) bool {
+			if row.Matches[i].Requests == row.Matches[j].Requests {
+				return row.Matches[i].Model < row.Matches[j].Model
+			}
+			return row.Matches[i].Requests > row.Matches[j].Requests
+		})
+		titles := make([]string, 0, len(row.Matches))
+		for _, match := range row.Matches {
+			titles = append(titles, fmt.Sprintf("%s：%d 次", match.Model, match.Requests))
+		}
+		row.MatchTitle = strings.Join(titles, "\n")
+		row.ShownMatches = row.Matches[:min(len(row.Matches), 4)]
+		row.HiddenMatches = len(row.Matches) - len(row.ShownMatches)
+		data.Prices = append(data.Prices, row)
 	}
+	for _, row := range unpriced {
+		data.Unpriced = append(data.Unpriced, *row)
+	}
+	sort.Slice(data.Unpriced, func(i, j int) bool {
+		if data.Unpriced[i].Requests == data.Unpriced[j].Requests {
+			return data.Unpriced[i].Model < data.Unpriced[j].Model
+		}
+		return data.Unpriced[i].Requests > data.Unpriced[j].Requests
+	})
 	var out bytes.Buffer
 	if err := dashboardTemplate.Execute(&out, data); err != nil {
 		return nil, fmt.Errorf("render dashboard: %w", err)
@@ -467,22 +640,37 @@ func renderDashboard() ([]byte, error) {
 }
 
 func lookupPrice(prices map[string]modelPrices, model string) (modelPrices, bool) {
-	if price, ok := prices[model]; ok {
-		return price, true
+	pattern, ok := matchPattern(prices, model)
+	if !ok {
+		return modelPrices{}, false
 	}
-	bestPrefix := ""
-	var bestPrice modelPrices
-	for pattern, price := range prices {
+	return prices[pattern], true
+}
+
+// matchPattern returns the price rule key used for model: an exact name wins, otherwise the longest "prefix*" rule.
+func matchPattern(prices map[string]modelPrices, model string) (string, bool) {
+	if _, ok := prices[model]; ok {
+		return model, true
+	}
+	best, bestPrefix := "", ""
+	for pattern := range prices {
 		prefix := strings.TrimSuffix(pattern, "*")
-		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(model, prefix) && len(prefix) > len(bestPrefix) {
-			bestPrefix = prefix
-			bestPrice = price
+		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(model, prefix) && (best == "" || len(prefix) > len(bestPrefix)) {
+			best, bestPrefix = pattern, prefix
 		}
 	}
-	if bestPrefix != "" {
-		return bestPrice, true
+	return best, best != ""
+}
+
+func normalizeMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "request", "image", "image-request":
+		return "request"
+	case "second", "seconds", "video":
+		return "second"
+	default:
+		return "token"
 	}
-	return modelPrices{}, false
 }
 
 func calculateCost(price modelPrices, requests, input, output, cacheRead, cacheWrite int64) float64 {
@@ -553,6 +741,18 @@ func parseFloat(value string) float64  { var n float64; _, _ = fmt.Sscan(value, 
 func formatPrice(value float64) string { return fmt.Sprintf("%.6g", value) }
 
 func okEnvelope(result any) ([]byte, error) { return json.Marshal(envelope{OK: true, Result: result}) }
+
+func jsonResponse(status int, body any) ([]byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return okEnvelope(map[string]any{
+		"StatusCode": status,
+		"Headers":    map[string][]string{"Content-Type": {"application/json; charset=utf-8"}, "Cache-Control": {"no-store"}},
+		"Body":       raw,
+	})
+}
 func errorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(envelope{OK: false, Error: map[string]string{"code": code, "message": message}})
 	return raw
@@ -562,14 +762,34 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>配置额度统计</title><style>
 :root{color-scheme:light dark;--bg:#f6f7fb;--card:#fff;--text:#172033;--muted:#667085;--line:#e5e7eb;--accent:#2563eb;--input:#fff} @media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--line:#374151;--accent:#60a5fa;--input:#111827}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.page{padding:24px;max-width:1600px;margin:auto}h1{margin:0 0 6px;font-size:25px}.hint{color:var(--muted);margin-bottom:20px}.cards{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px;margin-bottom:18px}.card,.panel{background:var(--card);border:1px solid var(--line);border-radius:12px}.card{padding:16px}.label{color:var(--muted)}.value{font-size:24px;font-weight:700;margin-top:5px}.panel{padding:16px;margin-top:16px;overflow:auto}h2{font-size:17px;margin:0 0 12px}table{border-collapse:collapse;width:100%;white-space:nowrap}th,td{text-align:right;padding:10px;border-bottom:1px solid var(--line)}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th{color:var(--muted);font-weight:600}#prices th{text-align:center!important}.unpriced{color:#d97706}.empty{text-align:center!important;color:var(--muted);padding:28px}code{font-size:12px}input{width:100%;min-width:100px;height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text);font:inherit;outline:none;transition:border-color .15s,box-shadow .15s}input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}button{height:36px;padding:0 13px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font:inherit;cursor:pointer;transition:background .15s,border-color .15s}button:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--card))}#prices td:last-child{padding-left:4px}#saved{color:#16a34a;margin-left:8px}@media(max-width:750px){.cards{grid-template-columns:1fr}.page{padding:14px}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.page{padding:24px;max-width:1600px;margin:auto}h1{margin:0 0 6px;font-size:25px}.hint{color:var(--muted);margin-bottom:20px}.cards{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:14px;margin-bottom:18px}.card,.panel{background:var(--card);border:1px solid var(--line);border-radius:12px}.card{padding:16px}.label{color:var(--muted)}.value{font-size:24px;font-weight:700;margin-top:5px}.panel{padding:16px;margin-top:16px;overflow:auto}h2{font-size:17px;margin:0 0 12px}table{border-collapse:collapse;width:100%;white-space:nowrap}th,td{text-align:right;padding:10px;border-bottom:1px solid var(--line)}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th{color:var(--muted);font-weight:600}.unpriced{color:#d97706}.empty{text-align:center!important;color:var(--muted);padding:28px}code{font-size:12px}input{width:100%;min-width:100px;height:36px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text);font:inherit;outline:none;transition:border-color .15s,box-shadow .15s}input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}button{height:36px;padding:0 13px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font:inherit;cursor:pointer;transition:background .15s,border-color .15s}button:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--card))}@media(max-width:750px){.cards{grid-template-columns:1fr}.page{padding:14px}}
 </style></head><body><main class="page"><h1>配置额度统计</h1><div class="hint">价格单位：{{.Currency}} / 100 万 token。缓存命中率 = 缓存读取 ÷（普通输入 + 缓存读取 + 缓存写入）。</div>
-<section class="cards"><div class="card"><div class="label">已定价费用</div><div class="value">{{.Currency}} {{.TotalCost}}</div></div><div class="card"><div class="label">请求数</div><div class="value">{{.TotalRequests}}</div></div><div class="card"><div class="label">缓存命中率</div><div class="value">{{.OverallHitRate}}</div></div></section>
+<section class="cards"><div class="card"><div class="label">已定价费用</div><div class="value">{{.Currency}} {{.TotalCost}}</div>{{if .Unpriced}}<div class="card-note">另有 {{len .Unpriced}} 个模型未定价，未计入</div>{{end}}</div><div class="card"><div class="label">请求数</div><div class="value">{{.TotalRequests}}</div></div><div class="card"><div class="label">缓存命中率</div><div class="value">{{.OverallHitRate}}</div></div></section>
 <section class="panel"><h2>按配置 / 模型</h2><table><thead><tr><th>配置（Auth ID）</th><th>模型</th><th>请求</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>费用 ({{.Currency}})</th></tr></thead><tbody>{{range .Rows}}<tr data-channel="{{.Channel}}"><td>{{.AuthID}}</td><td>{{.Model}}</td><td>{{.Requests}}</td><td>{{.Input}}</td><td>{{.Output}}</td><td>{{.CacheRead}}</td><td>{{.CacheWrite}}</td><td>{{.HitRate}}</td><td class="{{if eq .PriceState "未定价"}}unpriced{{end}}">{{.Cost}} {{if eq .PriceState "未定价"}}(未定价){{end}}</td></tr>{{else}}<tr><td colspan="9" class="empty">暂无成功请求记录</td></tr>{{end}}</tbody></table></section>
-<section class="panel"><h2>模型价格（可直接编辑）</h2><p class="hint">Token 模式单位：{{.Currency}} / 100 万 Token；每次/张、每秒模式分别按请求（图片）或时长计费。未配置但已产生用量的模型也会自动列出。</p><table id="prices"><thead><tr><th>模型（支持前缀 *）</th><th>模式</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>每次/张</th><th>每秒</th><th></th></tr></thead><tbody>{{range .Prices}}<tr><td><input value="{{.Model}}"></td><td><select><option value="token" {{if eq .Mode "request"}}{{else if eq .Mode "second"}}{{else}}selected{{end}}>Token</option><option value="request" {{if eq .Mode "request"}}selected{{end}}>每次/张</option><option value="second" {{if eq .Mode "second"}}selected{{end}}>每秒</option></select></td><td><input type="number" step="any" value="{{.Input}}"></td><td><input type="number" step="any" value="{{.Output}}"></td><td><input type="number" step="any" value="{{.CacheRead}}"></td><td><input type="number" step="any" value="{{.CacheWrite}}"></td><td><input type="number" step="any" value="{{.Request}}"></td><td><input type="number" step="any" value="{{.Second}}"></td><td><button type="button" onclick="this.closest('tr').remove()">删除</button></td></tr>{{end}}</tbody></table><button type="button" onclick="addPrice()">添加模型</button> <button type="button" onclick="savePrices()">保存价格</button><span id="saved"></span><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section></main><script>
-function addPrice(){document.querySelector('#prices tbody').insertAdjacentHTML('beforeend','<tr><td><input></td><td><select><option value="token" selected>Token</option><option value="request">每次/张</option><option value="second">每秒</option></select></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><input type="number" step="any" value="0"></td><td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td></tr>')}
-let pricesDirty=false;document.querySelector('#prices').addEventListener('input',()=>{pricesDirty=true});
-function savePrices(){let p={};document.querySelectorAll('#prices tbody tr').forEach(r=>{let i=r.querySelectorAll('input'),s=r.querySelector('select'),m=i[0].value.trim();if(m)p[m]={mode:s?s.value:'token',input:+i[1].value||0,output:+i[2].value||0,cache_read:+i[3].value||0,cache_write:+i[4].value||0,request:+i[5].value||0,second:+i[6].value||0}});pricesDirty=false;location.href=location.pathname+'?prices='+encodeURIComponent(JSON.stringify(p))}
+{{define "priceRow"}}<tr class="price-row" data-mode="{{.Mode}}"><td><input class="model" value="{{.Model}}" placeholder="模型名或前缀，如 claude-*"></td><td><select class="mode"><option value="token"{{if eq .Mode "token"}} selected{{end}}>按 Token</option><option value="request"{{if eq .Mode "request"}} selected{{end}}>按次 / 张</option><option value="second"{{if eq .Mode "second"}} selected{{end}}>按秒（暂不计费）</option></select></td><td><div class="fields"><label class="f-token">输入<input type="number" min="0" step="any" data-field="input" value="{{.Input}}"></label><label class="f-token">输出<input type="number" min="0" step="any" data-field="output" value="{{.Output}}"></label><label class="f-token">缓存读<input type="number" min="0" step="any" data-field="cache_read" value="{{.CacheRead}}"></label><label class="f-token">缓存写<input type="number" min="0" step="any" data-field="cache_write" value="{{.CacheWrite}}"></label><label class="f-request">每次 / 张<input type="number" min="0" step="any" data-field="request" value="{{.Request}}"></label><label class="f-second">每秒<input type="number" min="0" step="any" data-field="second" value="{{.Second}}"></label></div></td><td class="matches">{{if .Matches}}<div class="match-count" title="{{.MatchTitle}}">{{len .Matches}} 个模型 · {{.MatchRequests}} 次请求</div><div class="match-list" title="{{.MatchTitle}}">{{range .ShownMatches}}<code>{{.Model}}</code>{{end}}{{if .HiddenMatches}}<span class="more">+{{.HiddenMatches}}</span>{{end}}</div>{{else}}<span class="muted">暂无用量</span>{{end}}</td><td><button type="button" class="del" title="删除规则">删除</button></td></tr>{{end}}
+<section class="panel" id="pricePanel"><div class="price-head"><h2>模型价格</h2><div class="price-actions"><button type="button" onclick="openImport()">导入</button><button type="button" onclick="exportPrices()">导出</button><button type="button" onclick="addPrice()">+ 添加规则</button></div></div><p class="hint">按 Token 计费的单位是 {{.Currency}} / 100 万 Token，按次计费按请求（图片）次数计。模型名以 * 结尾表示前缀规则（如 <code>claude-*</code>），精确模型名优先，其次匹配最长前缀。</p>
+{{if .Unpriced}}<div class="unpriced-box"><h3>待定价：{{len .Unpriced}} 个模型有用量但没有命中任何规则，费用未计入合计</h3><table class="plain"><thead><tr><th>模型</th><th>请求</th><th>Token</th><th></th></tr></thead><tbody>{{range .Unpriced}}<tr><td><code>{{.Model}}</code></td><td>{{.Requests}}</td><td>{{.Tokens}}</td><td><button type="button" class="add-rule" data-model="{{.Model}}">设置价格</button></td></tr>{{end}}</tbody></table></div>{{end}}
+<table id="prices"><thead><tr><th>模型规则</th><th>计费模式</th><th>价格</th><th>命中模型</th><th></th></tr></thead><tbody>{{range .Prices}}{{template "priceRow" .}}{{else}}<tr class="empty-row"><td colspan="5" class="empty">还没有价格规则。点击“添加规则”，或用“导入”粘贴已有配置。</td></tr>{{end}}</tbody></table>
+<div class="price-foot"><button type="button" class="primary" onclick="savePrices()">保存价格</button><span id="saved"></span></div><p class="hint">数据文件：<code>{{.DataFile}}</code></p></section>
+<template id="priceRowTpl">{{template "priceRow" .EmptyPrice}}</template>
+<dialog id="importDialog"><h2>导入价格</h2><p class="hint">粘贴导出的 JSON，或 config.yaml 里的 <code>prices:</code> 配置段。同名规则会被覆盖，其余规则保留；导入后需点击“保存价格”才生效。</p><textarea spellcheck="false" placeholder="claude-*:&#10;  input: 3&#10;  output: 15&#10;  cache-read: 0.3&#10;  cache-write: 3.75"></textarea><div class="import-error"></div><div class="dialog-actions"><button type="button" onclick="this.closest('dialog').close()">取消</button><button type="button" class="primary" onclick="applyImport()">合并到列表</button></div></dialog>
+<style>.card-note{color:#d97706;font-size:12px;margin-top:4px}.price-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}.price-head h2{margin:0}.price-actions{margin-left:auto;display:flex;gap:8px}#pricePanel .hint{margin-bottom:14px}#pricePanel th,#pricePanel td{text-align:left!important;vertical-align:middle}#prices td{padding:10px 8px}#prices .model{min-width:200px}#prices select{height:36px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text);font:inherit}.fields{display:flex;gap:8px}.fields label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:12px}.fields input{width:96px;min-width:96px}.price-row[data-mode=token] .f-request,.price-row[data-mode=token] .f-second,.price-row[data-mode=request] .f-token,.price-row[data-mode=request] .f-second,.price-row[data-mode=second] .f-token,.price-row[data-mode=second] .f-request{display:none}.matches{white-space:normal;min-width:180px;max-width:320px}.match-count{font-size:12px;color:var(--muted);margin-bottom:4px}.match-list{display:flex;flex-wrap:wrap;gap:4px}.match-list code,.unpriced-box code{padding:1px 6px;border-radius:6px;background:color-mix(in srgb,var(--accent) 10%,transparent)}.more,.muted{color:var(--muted);font-size:12px}.unpriced-box{border:1px solid color-mix(in srgb,#d97706 45%,var(--line));background:color-mix(in srgb,#d97706 7%,var(--card));border-radius:10px;padding:12px 14px;margin-bottom:16px}.unpriced-box h3{margin:0 0 8px;font-size:14px;color:#d97706}.unpriced-box td,.unpriced-box th{padding:6px 10px}.price-foot{display:flex;align-items:center;gap:10px;margin-top:14px}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,#000)}#saved.ok{color:#16a34a}#saved.warn{color:#d97706}#saved.error{color:#dc2626}#importDialog{width:min(640px,94vw);border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--text);padding:20px}#importDialog::backdrop{background:#0008}#importDialog h2{margin:0 0 6px}#importDialog textarea{width:100%;height:260px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text);font:13px/1.5 ui-monospace,Consolas,monospace;resize:vertical}.import-error{color:#dc2626;min-height:20px;margin:6px 0}.dialog-actions{display:flex;justify-content:flex-end;gap:8px}@media(max-width:900px){#prices thead{display:none}#prices,#prices tbody,#prices tr,#prices td{display:block;width:100%}#prices .price-row{border:1px solid var(--line);border-radius:10px;padding:6px;margin-bottom:10px}#prices td{border:0;padding:6px}#prices .model{min-width:0}.fields{flex-wrap:wrap}.fields label{flex:1 1 40%}.fields input{width:100%;min-width:0}.matches{max-width:none}.price-actions{margin-left:0}}</style>
+</main><script>
+let pricesDirty=false;
+function setPriceStatus(text,cls){let s=document.querySelector('#saved');if(s){s.textContent=text;s.className=cls||''}}
+function markPricesDirty(){pricesDirty=true;setPriceStatus('有未保存的修改','warn')}
+function fillPriceRow(row,price){let mode=row.querySelector('.mode');mode.value=price.mode||'token';row.dataset.mode=mode.value;row.querySelectorAll('[data-field]').forEach(i=>i.value=price[i.dataset.field]??0)}
+function newPriceRow(model,price){let row=document.querySelector('#priceRowTpl').content.firstElementChild.cloneNode(true);row.querySelector('.model').value=model||'';if(price)fillPriceRow(row,price);row.querySelector('.matches').innerHTML='<span class="muted">保存后显示</span>';document.querySelector('#prices .empty-row')?.remove();document.querySelector('#prices tbody').append(row);return row}
+function addPrice(model){let row=newPriceRow(model),input=row.querySelector(model?'[data-field=input]':'.model');markPricesDirty();row.scrollIntoView({block:'nearest'});input.focus();input.select()}
+function collectPrices(){let prices={},error='';document.querySelectorAll('#prices .price-row').forEach(row=>{let model=row.querySelector('.model').value.trim();if(!model||error)return;if(prices[model]){error='规则重复：'+model;return}let price={mode:row.querySelector('.mode').value};row.querySelectorAll('[data-field]').forEach(i=>{let v=+i.value||0;if(v<0)error=model+' 的价格不能为负数';price[i.dataset.field]=v});prices[model]=price});return{prices,error}}
+async function savePrices(){let{prices,error}=collectPrices();if(error){setPriceStatus(error,'error');return}setPriceStatus('保存中…','');try{let response=await fetch(location.pathname+'?prices='+encodeURIComponent(JSON.stringify(prices)),{cache:'no-store'}),text=await response.text();if(!response.ok){let message='';try{message=JSON.parse(text).error}catch(e){}throw new Error(message||'HTTP '+response.status)}let doc=new DOMParser().parseFromString(text,'text/html'),panel=doc.querySelector('#pricePanel');if(panel)document.querySelector('#pricePanel').replaceWith(document.importNode(panel,true));pricesDirty=false;setPriceStatus('已保存 '+Object.keys(prices).length+' 条规则','ok');refreshDashboard()}catch(e){setPriceStatus('保存失败：'+e.message,'error')}}
+function exportPrices(){let{prices,error}=collectPrices();if(error){setPriceStatus(error,'error');return}let text=JSON.stringify(prices,null,2)+'\n',link=document.createElement('a');link.href=URL.createObjectURL(new Blob([text],{type:'application/json'}));link.download='usage-quota-prices.json';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);navigator.clipboard?.writeText(text).then(()=>setPriceStatus('已导出，并复制到剪贴板','ok'),()=>{})}
+function openImport(){let dialog=document.querySelector('#importDialog');dialog.querySelector('textarea').value='';dialog.querySelector('.import-error').textContent='';dialog.showModal();dialog.querySelector('textarea').focus()}
+async function applyImport(){let dialog=document.querySelector('#importDialog'),text=dialog.querySelector('textarea').value.trim(),errorBox=dialog.querySelector('.import-error');if(!text)return;try{let response=await fetch(location.pathname+'?prices_parse='+encodeURIComponent(text),{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.error||'HTTP '+response.status);let count=0;Object.entries(data.prices||{}).forEach(([model,price])=>{let row=Array.from(document.querySelectorAll('#prices .price-row')).find(r=>r.querySelector('.model').value.trim()===model);if(row)fillPriceRow(row,price);else newPriceRow(model,price);count++});dialog.close();markPricesDirty();setPriceStatus('已导入 '+count+' 条规则，点击“保存价格”后生效','warn')}catch(e){errorBox.textContent='导入失败：'+e.message}}
+document.addEventListener('input',e=>{if(e.target.closest('#prices'))markPricesDirty()});
+document.addEventListener('change',e=>{if(e.target.matches('#prices .mode')){e.target.closest('tr').dataset.mode=e.target.value;markPricesDirty()}});
+document.addEventListener('click',e=>{let button=e.target.closest('button');if(!button)return;if(button.matches('#prices .del')){button.closest('tr').remove();markPricesDirty()}else if(button.matches('.add-rule')){let row=button.closest('tr'),body=row.parentElement;addPrice(button.dataset.model);row.remove();if(!body.rows.length)body.closest('.unpriced-box').remove()}});
+window.addEventListener('beforeunload',e=>{if(pricesDirty){e.preventDefault();e.returnValue=''}});
 function esc(v){return v.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function closeUsageModal(){document.querySelectorAll('.usage-modal').forEach(m=>m.classList.remove('open'));localStorage.setItem('usage-quota-modal','')}
 function openUsageModal(id){closeUsageModal();let m=Array.from(document.querySelectorAll('.usage-modal')).find(x=>x.dataset.id===id);if(m){m.classList.add('open');localStorage.setItem('usage-quota-modal',id)}}
