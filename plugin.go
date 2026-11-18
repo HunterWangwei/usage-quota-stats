@@ -150,7 +150,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.5.0",
+				"Version":          "1.5.1",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{

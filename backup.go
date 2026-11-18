@@ -16,11 +16,7 @@ import (
 )
 
 // Backups live next to the data file: versioned copies of the settings files taken before every save, and a
-// daily zip of the usage records plus all settings.
-const (
-	settingsVersionsKept = 30
-	dailyBackupsKept     = 7
-)
+// daily zip of the usage records plus all settings. Backups are never deleted automatically.
 
 var (
 	backupNamePattern  = regexp.MustCompile(`^(accounts|prices)-\d{8}-\d{6}(-\d+)?\.json$|^(daily|manual)-\d{8}(-\d{6})?\.zip$`)
@@ -71,9 +67,7 @@ func versionSettingsLocked(kind string) {
 	for i := 1; fileExists(filepath.Join(dir, name)); i++ {
 		name = fmt.Sprintf("%s-%s-%d.json", kind, stamp, i)
 	}
-	if os.WriteFile(filepath.Join(dir, name), data, 0o600) == nil {
-		pruneBackups(dir, kind+"-", settingsVersionsKept)
-	}
+	_ = os.WriteFile(filepath.Join(dir, name), data, 0o600)
 }
 
 // maybeDailyBackup writes one zip per calendar day in the background. Usage records are copied up to the size
@@ -105,7 +99,6 @@ func maybeDailyBackup(now time.Time) {
 		defer dailyBackupBusy.Store(false)
 		if writeBackupZip(filepath.Join(dir, name)) == nil {
 			lastDailyBackup.Store(day)
-			pruneBackups(dir, "daily-", dailyBackupsKept)
 		}
 	}()
 }
@@ -120,7 +113,6 @@ func createManualBackup(now time.Time) (string, error) {
 	if err := writeBackupZip(filepath.Join(dir, name)); err != nil {
 		return "", err
 	}
-	pruneBackups(dir, "manual-", dailyBackupsKept)
 	return name, nil
 }
 
@@ -276,24 +268,6 @@ func restoreSettingsBackup(name string) error {
 	defer func() { _ = os.Remove(temp) }()
 	settings, schedule := loadAccountSettings(temp, state.location)
 	return commitAccountSettingsLocked(settings, schedule)
-}
-
-func pruneBackups(dir, prefix string, keep int) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	var names []string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), prefix) && backupNamePattern.MatchString(entry.Name()) {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names) // timestamps sort chronologically
-	for len(names) > keep {
-		_ = os.Remove(filepath.Join(dir, names[0]))
-		names = names[1:]
-	}
 }
 
 func fileExists(path string) bool {

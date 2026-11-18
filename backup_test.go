@@ -113,13 +113,13 @@ func TestFullBackupContainsDataAndSettings(t *testing.T) {
 	}
 }
 
-func TestDailyBackupOncePerDayAndPruned(t *testing.T) {
+func TestDailyBackupOncePerDayAndKept(t *testing.T) {
 	path := setupDashboard(t, "", use("codex", "a.json", time.Now()))
 	dir := backupDirFor(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for day := 1; day <= 9; day++ { // older daily backups beyond the kept number get pruned
+	for day := 1; day <= 9; day++ { // older daily backups are never deleted
 		_ = os.WriteFile(filepath.Join(dir, "daily-202611"+twoDigits(day)+".zip"), []byte("x"), 0o600)
 	}
 	dailyBackupEnabled = true
@@ -137,7 +137,7 @@ func TestDailyBackupOncePerDayAndPruned(t *testing.T) {
 			daily = append(daily, file.Name)
 		}
 	}
-	if len(daily) != dailyBackupsKept || !fileExists(filepath.Join(dir, "daily-"+now.In(state.location).Format("20060102")+".zip")) || fileExists(filepath.Join(dir, "daily-20261101.zip")) {
+	if len(daily) != 10 || !fileExists(filepath.Join(dir, "daily-"+now.In(state.location).Format("20060102")+".zip")) || !fileExists(filepath.Join(dir, "daily-20261101.zip")) {
 		t.Fatalf("daily backups = %v", daily)
 	}
 }

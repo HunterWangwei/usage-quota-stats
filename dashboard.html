@@ -68,7 +68,7 @@ dialog{border:1px solid var(--line);border-radius:14px;background:var(--card);co
 <p class="hint">完整备份包含用量记录和所有设置（成本、倍率、价格），打包成 zip。建议定期下载一份保存到其他电脑或网盘，服务器磁盘损坏时也能恢复。</p>
 <div class="scroll"><table><thead><tr><th class="l">文件</th><th>大小</th><th>最后修改</th></tr></thead><tbody id="sourceRows"></tbody></table></div></div>
 <div class="panel"><div class="panel-head"><h2>备份</h2><span class="muted" id="backupDir"></span><div class="right"><button type="button" id="refreshBackups">刷新</button></div></div>
-<p class="hint">每次保存成本、倍率或价格之前，会自动备份旧的设置文件（各保留最近 30 份），改错了可以在这里一键恢复。每天自动生成一份完整备份（保留最近 7 天）。恢复前会先备份当前设置，恢复操作也可以撤销。</p>
+<p class="hint">每次保存成本、倍率或价格之前，会自动备份旧的设置文件，改错了可以在这里一键恢复。每天自动生成一份完整备份。所有备份都不会自动删除，占用空间过多时请手动删除备份目录里不需要的文件。恢复前会先备份当前设置，恢复操作也可以撤销。</p>
 <div class="scroll"><table><thead><tr><th class="l">时间</th><th class="l">类型</th><th class="l">文件名</th><th>大小</th><th></th></tr></thead><tbody id="backupRows"></tbody></table></div>
 <div class="savebar"><span class="status" id="backupStatus"></span></div></div>
 </section>
