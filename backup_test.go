@@ -143,3 +143,25 @@ func TestDailyBackupOncePerDayAndKept(t *testing.T) {
 }
 
 func twoDigits(n int) string { return string(rune('0'+n/10)) + string(rune('0'+n%10)) }
+
+func TestRetireEndpointAndRestore(t *testing.T) {
+	shanghai, _ := time.LoadLocation("Asia/Shanghai")
+	retire := time.Date(2026, 11, 10, 15, 0, 0, 0, shanghai)
+	setupDashboard(t, "prices:\n  '*':\n    input: 1\n", use("codex", "a.json", retire.Add(-time.Hour)), use("codex", "a.json", retire.Add(time.Hour)))
+	if _, err := handleMethod("management.handle", []byte(`{"Query":{"retire":["a.json"],"at":["2026-11-10T07:00:00Z"]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	a := findAccount(t, buildDashboard("all", retire.Add(time.Hour*24)), "a.json")
+	if a.RetiredAt == nil || a.Total.Requests != 1 || a.AfterRetired.Requests != 1 || a.Pending {
+		t.Fatalf("retired = %#v", a)
+	}
+	if err := setRetirement("a.json", ""); err != nil {
+		t.Fatal(err)
+	}
+	if a = findAccount(t, buildDashboard("all", retire.Add(time.Hour*24)), "a.json"); a.RetiredAt != nil || a.Total.Requests != 2 {
+		t.Fatalf("restored = %#v", a)
+	}
+	if err := setRetirement("a.json", "later"); err == nil {
+		t.Fatal("bad time should be rejected")
+	}
+}

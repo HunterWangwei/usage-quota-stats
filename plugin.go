@@ -150,7 +150,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.5.1",
+				"Version":          "1.5.2",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -231,6 +231,13 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 		}
 		if name, ok := query("backup_restore"); ok {
 			if err := restoreSettingsBackup(name); err != nil {
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})
+		}
+		if id, ok := query("retire"); ok {
+			at, _ := query("at")
+			if err := setRetirement(id, at); err != nil {
 				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
 			}
 			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})

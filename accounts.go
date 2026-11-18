@@ -531,3 +531,34 @@ func (o accountOverride) retiredTime() (time.Time, bool) {
 	at, err := time.Parse(time.RFC3339, o.RetiredAt)
 	return at, err == nil
 }
+
+// setRetirement retires a credential at the given RFC3339 time, or restores it when at is empty.
+func setRetirement(id, at string) error {
+	id, at = strings.TrimSpace(id), strings.TrimSpace(at)
+	if id == "" {
+		return fmt.Errorf("缺少账号")
+	}
+	if at != "" {
+		parsed, err := time.Parse(time.RFC3339, at)
+		if err != nil {
+			return fmt.Errorf("下架时间格式不正确")
+		}
+		at = parsed.Format(time.RFC3339)
+	}
+	state.Lock()
+	defer state.Unlock()
+	settings := state.accounts
+	accounts := make(map[string]accountOverride, len(settings.Accounts)+1)
+	for key, override := range settings.Accounts {
+		accounts[key] = override
+	}
+	override := accounts[id]
+	override.RetiredAt = at
+	accounts[id] = override
+	rates, schedule, err := parseRates(settings.ChannelRates, state.location, retirementTimes(accounts))
+	if err != nil {
+		return err
+	}
+	settings.Accounts, settings.ChannelRates = accounts, rates
+	return commitAccountSettingsLocked(settings, schedule)
+}
