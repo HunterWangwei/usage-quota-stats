@@ -30,7 +30,7 @@ type usageStats struct {
 	CacheRead        int64   `json:"cacheRead"`
 	CacheWrite       int64   `json:"cacheWrite"`
 	Cost             float64 `json:"cost"`    // API-equivalent cost at the configured model prices
-	Revenue          float64 `json:"revenue"` // cost multiplied by the account's resale multiplier
+	Revenue          float64 `json:"revenue"` // cost multiplied by the resale multiplier in effect when each request was made
 	UnpricedRequests int64   `json:"unpricedRequests"`
 }
 
@@ -41,28 +41,27 @@ type modelView struct {
 }
 
 type accountView struct {
-	ID               string      `json:"id"`
-	Email            string      `json:"email"`
-	Label            string      `json:"label"`
-	Channel          string      `json:"channel"`
-	Status           string      `json:"status"`
-	StatusMessage    string      `json:"statusMessage"`
-	Disabled         bool        `json:"disabled"`
-	Unavailable      bool        `json:"unavailable"`
-	Listed           bool        `json:"listed"`
-	LastUsed         *time.Time  `json:"lastUsed"`
-	Range            usageStats  `json:"range"`
-	Total            usageStats  `json:"total"`
-	Models           []modelView `json:"models"`
-	Cost             *float64    `json:"cost"`
-	CostSource       string      `json:"costSource"`
-	Multiplier       float64     `json:"multiplier"`
-	MultiplierSource string      `json:"multiplierSource"`
-	Profit           *float64    `json:"profit"`
-	Payback          *float64    `json:"payback"`
-	Note             string      `json:"note"`
-	Batch            string      `json:"batch"`
-	BatchName        string      `json:"batchName"`
+	ID            string      `json:"id"`
+	Email         string      `json:"email"`
+	Label         string      `json:"label"`
+	Channel       string      `json:"channel"`
+	Status        string      `json:"status"`
+	StatusMessage string      `json:"statusMessage"`
+	Disabled      bool        `json:"disabled"`
+	Unavailable   bool        `json:"unavailable"`
+	Listed        bool        `json:"listed"`
+	LastUsed      *time.Time  `json:"lastUsed"`
+	Range         usageStats  `json:"range"`
+	Total         usageStats  `json:"total"`
+	Models        []modelView `json:"models"`
+	Cost          *float64    `json:"cost"`
+	CostSource    string      `json:"costSource"`
+	Profit        *float64    `json:"profit"`
+	Payback       *float64    `json:"payback"`
+	Note          string      `json:"note"`
+	Batch         string      `json:"batch"`
+	BatchName     string      `json:"batchName"`
+	PeriodCost    []float64   `json:"periodCost"` // all-time priced cost per rate period, for live recalculation
 }
 
 type dailyPoint struct {
@@ -77,6 +76,7 @@ type summaryView struct {
 	Range          usageStats `json:"range"`
 	TotalRevenue   float64    `json:"totalRevenue"`
 	AccountCost    float64    `json:"accountCost"`
+	Multiplier     float64    `json:"multiplier"` // resale multiplier in effect now
 	Profit         float64    `json:"profit"`
 	CostedAccounts int        `json:"costedAccounts"`
 	Accounts       int        `json:"accounts"`
@@ -112,6 +112,7 @@ type dashboardPayload struct {
 	Prices      []priceView     `json:"prices"`
 	Unpriced    []unpricedRow   `json:"unpriced"`
 	Settings    accountSettings `json:"settings"`
+	Rates       []rateView      `json:"rates"`
 }
 
 // chartDays caps the trend chart for long ranges so bars stay readable.
@@ -162,6 +163,7 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 	location := state.location
 	dataFile := state.dataFile
 	settings := state.accounts
+	schedule := state.schedule
 	aggregates := make([]aggregate, 0, len(state.rows))
 	for _, row := range state.rows {
 		aggregates = append(aggregates, *row)
@@ -175,6 +177,8 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 		Range: window, Settings: settings,
 	}
 
+	periodCost := make([]float64, len(schedule.multipliers)+1)
+	periodRequests := make([]int64, len(schedule.multipliers)+1)
 	auths := authSnapshot()
 	chartFrom := now.AddDate(0, 0, -(chartDays - 1)).Format(time.DateOnly)
 	accounts := make(map[string]*accountView)
@@ -191,7 +195,8 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 			}
 			terms := settings.effectiveAccount(id)
 			view.Batch, view.BatchName, view.Note = terms.Batch, terms.BatchName, terms.Note
-			view.Cost, view.CostSource, view.Multiplier, view.MultiplierSource = terms.Cost, terms.CostSource, terms.Multiplier, terms.MultiplierSource
+			view.Cost, view.CostSource = terms.Cost, terms.CostSource
+			view.PeriodCost = make([]float64, len(schedule.multipliers))
 			accounts[id] = view
 			models[id] = make(map[string]*modelView)
 		}
@@ -203,7 +208,15 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 		price, priced := lookupPrice(cfg.Prices, item.Model)
 		regularInput := regularInputTokens(item.Provider, item.InputTokens, item.CacheReadTokens, item.CacheCreationTokens)
 		cost := calculateCost(price, item.Requests, regularInput, item.OutputTokens, item.CacheReadTokens, item.CacheCreationTokens)
-		view.Total.add(item, regularInput, cost, view.Multiplier, priced)
+		multiplier := schedule.multiplier(item.Period)
+		view.Total.add(item, regularInput, cost, multiplier, priced)
+		if priced {
+			periodCost[item.Period] += cost
+			if item.Period < len(view.PeriodCost) {
+				view.PeriodCost[item.Period] += cost
+			}
+		}
+		periodRequests[item.Period] += item.Requests
 		if !item.LastUsed.IsZero() && (view.LastUsed == nil || item.LastUsed.After(*view.LastUsed)) {
 			lastUsed := item.LastUsed.In(location)
 			view.LastUsed = &lastUsed
@@ -234,19 +247,19 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 			point.Failures += item.Failures
 			if priced {
 				point.Cost += cost
-				point.Revenue += cost * view.Multiplier
+				point.Revenue += cost * multiplier
 			}
 		}
 		if !window.contains(item.Day) {
 			continue
 		}
-		view.Range.add(item, regularInput, cost, view.Multiplier, priced)
+		view.Range.add(item, regularInput, cost, multiplier, priced)
 		model := models[item.AuthID][item.Model]
 		if model == nil {
 			model = &modelView{Model: item.Model, Priced: priced}
 			models[item.AuthID][item.Model] = model
 		}
-		model.add(item, regularInput, cost, view.Multiplier, priced)
+		model.add(item, regularInput, cost, multiplier, priced)
 	}
 
 	// Credentials known to the host but never used still show up so their purchase cost counts.
@@ -300,6 +313,8 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 	})
 
 	payload.Daily = fillDays(daily, window, now)
+	payload.Summary.Multiplier = schedule.multiplier(schedule.period(now))
+	payload.Rates = buildRateViews(settings.Rates, schedule, periodCost, periodRequests, now)
 
 	patterns := make([]string, 0, len(cfg.Prices))
 	for pattern := range cfg.Prices {
@@ -404,4 +419,33 @@ func renderDashboardPage(rangeKey string, now time.Time) ([]byte, error) {
 		return nil, fmt.Errorf("encode dashboard: %w", err)
 	}
 	return bytes.Replace(dashboardHTML, dashboardDataMarker, data, 1), nil
+}
+
+// rateView is one period of the multiplier timeline with the usage valued at it (all time).
+type rateView struct {
+	From       string  `json:"from"`
+	To         string  `json:"to"`
+	Multiplier float64 `json:"multiplier"`
+	Note       string  `json:"note"`
+	Requests   int64   `json:"requests"`
+	Cost       float64 `json:"cost"`
+	Revenue    float64 `json:"revenue"`
+	Current    bool    `json:"current"`
+}
+
+func buildRateViews(rates []rateChange, schedule rateSchedule, cost []float64, requests []int64, now time.Time) []rateView {
+	current := schedule.period(now)
+	views := make([]rateView, 0, len(rates))
+	for i, rate := range rates {
+		view := rateView{From: rate.From, Multiplier: rate.Multiplier, Note: rate.Note, Current: i == current}
+		if i+1 < len(rates) {
+			view.To = rates[i+1].From
+		}
+		if i < len(cost) {
+			view.Cost, view.Requests = cost[i], requests[i]
+			view.Revenue = cost[i] * rate.Multiplier
+		}
+		views = append(views, view)
+	}
+	return views
 }

@@ -143,51 +143,6 @@ func recordAll(t *testing.T, records ...usageRecord) {
 	}
 }
 
-func TestNewBatchDoesNotChangeEarlierAccounts(t *testing.T) {
-	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
-	path := setupDashboard(t, "prices:\n  '*':\n    input: 1\n", codexUse("codex-old.json", now))
-	// Batch 1 becomes the codex default: the already-seen, unassigned credential joins it on the next page load.
-	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30,"multiplier":0.3}},"defaultBatch":{"codex":"b1"}}`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := handleMethod("management.handle", []byte(`{"Query":{"api":["1"]}}`)); err != nil {
-		t.Fatal(err)
-	}
-	// Batch 2 with higher cost and multiplier becomes the default; only credentials seen afterwards use it.
-	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30,"multiplier":0.3},"b2":{"name":"第二批","cost":60,"multiplier":0.8}},"defaultBatch":{"codex":"b2"},"accounts":{"codex-old.json":{"batch":"b1"}}}`); err != nil {
-		t.Fatal(err)
-	}
-	recordAll(t, codexUse("codex-new.json", now))
-	payload := buildDashboard("all", now)
-	old, fresh := findAccount(t, payload, "codex-old.json"), findAccount(t, payload, "codex-new.json")
-	if old.Batch != "b1" || *old.Cost != 30 || old.Multiplier != 0.3 || !near(*old.Profit, 0) || old.BatchName != "第一批" {
-		t.Fatalf("old account changed: %#v", old)
-	}
-	if fresh.Batch != "b2" || *fresh.Cost != 60 || !near(fresh.Total.Revenue, 80) || !near(*fresh.Profit, 20) {
-		t.Fatalf("new account = %#v", fresh)
-	}
-	// A per-account override wins over its batch.
-	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30,"multiplier":0.3},"b2":{"name":"第二批","cost":60,"multiplier":0.8}},"defaultBatch":{"codex":"b2"},"accounts":{"codex-old.json":{"batch":"b1","cost":10}}}`); err != nil {
-		t.Fatal(err)
-	}
-	if old = findAccount(t, buildDashboard("all", now), "codex-old.json"); *old.Cost != 10 || old.CostSource != "account" || old.MultiplierSource != "batch" {
-		t.Fatalf("override = %#v", old)
-	}
-	// The page did not send codex-new.json, but its assignment must survive the save and a reload.
-	if err := applyConfig([]byte("data-file: " + path + "\ntimezone: Asia/Shanghai\n")); err != nil {
-		t.Fatal(err)
-	}
-	if got := state.accounts.Accounts["codex-new.json"].Batch; got != "b2" {
-		t.Fatalf("new account batch after reload = %q", got)
-	}
-	if err := updateAccountSettings(`{"batches":{"b1":{"name":"","cost":1}}}`); err == nil {
-		t.Fatal("empty batch name should be rejected")
-	}
-	if err := updateAccountSettings(`{"batches":{"b1":{"name":"x","cost":-1}}}`); err == nil {
-		t.Fatal("negative batch cost should be rejected")
-	}
-}
-
 func TestUnassignedAccountStaysOutOfLaterDefault(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	setupDashboard(t, "", codexUse("codex-a.json", now))
@@ -198,6 +153,89 @@ func TestUnassignedAccountStaysOutOfLaterDefault(t *testing.T) {
 	recordAll(t, codexUse("codex-a.json", now))
 	if a := findAccount(t, buildDashboard("all", now), "codex-a.json"); a.Batch != "" || a.Cost != nil {
 		t.Fatalf("explicitly unassigned account was moved: %#v", a)
+	}
+}
+
+// The user's scenario: batch 1 bought at ¥25, later batch 2 at ¥26 while the selling multiplier rises from
+// 0.3 to 0.35 for everyone. Each request is valued at the multiplier in effect when it was made, and each
+// account keeps its own batch cost.
+func TestRateTimelineAppliesToAllAccountsByRequestTime(t *testing.T) {
+	shanghai, _ := time.LoadLocation("Asia/Shanghai")
+	change := time.Date(2026, 11, 10, 15, 0, 0, 0, shanghai)
+	path := setupDashboard(t, "prices:\n  '*':\n    input: 1\n",
+		codexUse("old.json", change.Add(-2*time.Hour)), // same day, before the change
+	)
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":25}},"defaultBatch":{"codex":"b1"},"rates":[{"from":"","multiplier":0.3}]}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handleMethod("management.handle", []byte(`{"Query":{"api":["1"]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	// The multiplier change is entered after the fact; requests already recorded after it must be revalued.
+	recordAll(t, codexUse("old.json", change.Add(time.Hour)))
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":25},"b2":{"name":"第二批","cost":26}},"defaultBatch":{"codex":"b2"},
+		"rates":[{"from":"2026-11-10T07:00:00Z","multiplier":0.35,"note":"第二批进货调价"},{"from":"","multiplier":0.3}]}`); err != nil {
+		t.Fatal(err)
+	}
+	recordAll(t, codexUse("old.json", change.Add(24*time.Hour)), codexUse("new.json", change.Add(24*time.Hour)))
+	now := change.Add(48 * time.Hour)
+	payload := buildDashboard("all", now)
+	old, fresh := findAccount(t, payload, "old.json"), findAccount(t, payload, "new.json")
+	// old: ¥100 before the change at 0.3, ¥200 after at 0.35 → 30 + 70 = 100 revenue, cost 25.
+	if old.Batch != "b1" || *old.Cost != 25 || !near(old.Total.Cost, 300) || !near(old.Total.Revenue, 100) || !near(*old.Profit, 75) {
+		t.Fatalf("old account = cost %v revenue %v profit %v batch %s", *old.Cost, old.Total.Revenue, *old.Profit, old.Batch)
+	}
+	// new: ¥100 after the change at 0.35, cost 26.
+	if fresh.Batch != "b2" || *fresh.Cost != 26 || !near(fresh.Total.Revenue, 35) || !near(*fresh.Profit, 9) {
+		t.Fatalf("new account = cost %v revenue %v profit %v batch %s", *fresh.Cost, fresh.Total.Revenue, *fresh.Profit, fresh.Batch)
+	}
+	if len(payload.Rates) != 2 || !near(payload.Rates[0].Revenue, 30) || !near(payload.Rates[1].Revenue, 105) || !payload.Rates[1].Current || payload.Summary.Multiplier != 0.35 {
+		t.Fatalf("rates = %#v, current multiplier %v", payload.Rates, payload.Summary.Multiplier)
+	}
+	if payload.Rates[1].From != "2026-11-10T15:00:00+08:00" || payload.Rates[0].To != payload.Rates[1].From {
+		t.Fatalf("rate times should be normalized to the configured timezone: %#v", payload.Rates)
+	}
+	// Today's chart point mixes nothing up: the change day holds 100×0.3 + 100×0.35.
+	for _, point := range buildDashboard("30d", now).Daily {
+		if point.Day == "2026-11-10" && !near(point.Revenue, 65) {
+			t.Fatalf("change-day revenue = %v, want 65", point.Revenue)
+		}
+	}
+	// The timeline survives a reload, and the buckets are rebuilt from the raw records.
+	if err := applyConfig([]byte("data-file: " + path + "\ntimezone: Asia/Shanghai\nprices:\n  '*':\n    input: 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if again := findAccount(t, buildDashboard("all", now), "old.json"); !near(again.Total.Revenue, 100) {
+		t.Fatalf("revenue after reload = %v", again.Total.Revenue)
+	}
+	for _, bad := range []string{
+		`{"rates":[{"from":"2026-11-10T07:00:00Z","multiplier":0.35}]}`,
+		`{"rates":[{"from":"","multiplier":0.3},{"from":"","multiplier":0.4}]}`,
+		`{"rates":[{"from":"","multiplier":0.3},{"from":"tomorrow","multiplier":0.4}]}`,
+		`{"rates":[{"from":"","multiplier":-1}]}`,
+		`{"rates":[{"from":"","multiplier":0.3},{"from":"2026-11-10T07:00:00Z","multiplier":0.4},{"from":"2026-11-10T15:00:00+08:00","multiplier":0.5}]}`,
+	} {
+		if err := updateAccountSettings(bad); err == nil {
+			t.Fatalf("expected %s to be rejected", bad)
+		}
+	}
+}
+
+func TestBatchMultipliersMigrateToRateTimeline(t *testing.T) {
+	path := t.TempDir() + "/usage.jsonl"
+	v120 := `{"batches":{"b1":{"name":"第一批","date":"2026-11-01","cost":25,"multiplier":0.3},"b2":{"name":"第二批","date":"2026-11-10","cost":26,"multiplier":0.35}},"accounts":{"a.json":{"batch":"b1","multiplier":0.9}}}`
+	if err := os.WriteFile(path+".accounts.json", []byte(v120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyConfig([]byte("data-file: " + path + "\ntimezone: Asia/Shanghai\n")); err != nil {
+		t.Fatal(err)
+	}
+	rates := state.accounts.Rates
+	if len(rates) != 2 || rates[0].From != "" || rates[0].Multiplier != 0.3 || rates[1].From != "2026-11-10T00:00:00+08:00" || rates[1].Multiplier != 0.35 {
+		t.Fatalf("migrated rates = %#v", rates)
+	}
+	if state.accounts.Batches["b1"].LegacyMultiplier != nil || state.accounts.Accounts["a.json"].LegacyMultiplier != nil {
+		t.Fatal("legacy multipliers should be cleared")
 	}
 }
 
@@ -214,14 +252,14 @@ func TestLegacyChannelDefaultsMigrateToBatches(t *testing.T) {
 	recordAll(t, codexUse("codex-y.json", now), codexUse("codex-x.json", now))
 	payload := buildDashboard("all", now)
 	x, y := findAccount(t, payload, "codex-x.json"), findAccount(t, payload, "codex-y.json")
-	// codex-y inherited channel cost 50 and global ×0.5 in 1.1.0; codex-x had its own cost 20 on top of that.
-	if y.Batch != "migrated-codex" || *y.Cost != 50 || y.Multiplier != 0.5 || !near(*y.Profit, 0) {
+	// 1.1.0: codex-y inherited channel cost 50 and global ×0.5; codex-x had its own cost 20.
+	if y.Batch != "migrated-codex" || *y.Cost != 50 || !near(*y.Profit, 0) {
 		t.Fatalf("migrated account = %#v", y)
 	}
-	if x.Batch != "migrated-codex" || *x.Cost != 20 || x.CostSource != "account" || x.Multiplier != 0.5 || !near(*x.Profit, 30) {
+	if x.Batch != "migrated-codex" || *x.Cost != 20 || x.CostSource != "account" || !near(*x.Profit, 30) {
 		t.Fatalf("pre-configured account = %#v", x)
 	}
-	if payload.Settings.LegacyChannels != nil || payload.Settings.LegacyMultiplier != nil || len(payload.Settings.LegacyAccounts) != 0 {
-		t.Fatalf("legacy fields should be cleared after migration: %#v", payload.Settings)
+	if payload.Summary.Multiplier != 0.5 || payload.Settings.LegacyChannels != nil || payload.Settings.LegacyMultiplier != nil {
+		t.Fatalf("legacy fields should be migrated: %#v", payload.Settings)
 	}
 }

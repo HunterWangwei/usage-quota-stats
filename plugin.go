@@ -83,11 +83,13 @@ type storedUsage struct {
 	StatusCode          int       `json:"status_code,omitempty"`
 }
 
-// aggregateKey buckets usage per credential, model and calendar day (in the configured timezone).
+// aggregateKey buckets usage per credential, model, calendar day (in the configured timezone) and resale
+// rate period, so a day containing a multiplier change is split exactly at the change.
 type aggregateKey struct {
 	AuthID string
 	Model  string
 	Day    string
+	Period int
 }
 
 type aggregate struct {
@@ -96,6 +98,7 @@ type aggregate struct {
 	AuthID              string
 	Model               string
 	Day                 string
+	Period              int
 	Requests            int64
 	Failures            int64
 	InputTokens         int64
@@ -112,6 +115,7 @@ var state = struct {
 	dataFile string
 	rows     map[aggregateKey]*aggregate
 	accounts accountSettings
+	schedule rateSchedule
 }{rows: make(map[aggregateKey]*aggregate), location: time.Local, accounts: defaultAccountSettings()}
 
 type hostCaller func(method string, payload []byte) ([]byte, error)
@@ -146,7 +150,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.2.0",
+				"Version":          "1.3.0",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -302,10 +306,12 @@ func applyConfig(raw []byte) error {
 		return fmt.Errorf("resolve data file: %w", err)
 	}
 
+	accounts, schedule := loadAccountSettings(path+".accounts.json", location)
+
 	state.Lock()
 	defer state.Unlock()
-	if state.dataFile != path || state.location.String() != location.String() {
-		rows, errLoad := loadUsage(path, location)
+	if state.dataFile != path || state.location.String() != location.String() || state.schedule.key() != schedule.key() {
+		rows, errLoad := loadUsage(path, location, schedule)
 		if errLoad != nil {
 			return errLoad
 		}
@@ -316,7 +322,8 @@ func applyConfig(raw []byte) error {
 	if saved, errRead := os.ReadFile(path + ".prices.json"); errRead == nil {
 		_ = json.Unmarshal(saved, &cfg.Prices)
 	}
-	state.accounts = loadAccountSettings(path + ".accounts.json")
+	state.accounts = accounts
+	state.schedule = schedule
 	state.config = cfg
 	return nil
 }
@@ -490,14 +497,14 @@ func recordUsage(record usageRecord) error {
 	if _, errWrite := file.Write(append(raw, '\n')); errWrite != nil {
 		return fmt.Errorf("append usage data: %w", errWrite)
 	}
-	addUsage(state.rows, item, state.location)
+	addUsage(state.rows, item, state.location, state.schedule)
 	if errAssign := assignNewAccounts(map[string]string{authID: channelForAuth(record.Provider, record.AuthType, authID)}); errAssign != nil {
 		return errAssign
 	}
 	return nil
 }
 
-func loadUsage(path string, location *time.Location) (map[aggregateKey]*aggregate, error) {
+func loadUsage(path string, location *time.Location, schedule rateSchedule) (map[aggregateKey]*aggregate, error) {
 	rows := make(map[aggregateKey]*aggregate)
 	file, errOpen := os.Open(path)
 	if os.IsNotExist(errOpen) {
@@ -517,7 +524,7 @@ func loadUsage(path string, location *time.Location) (map[aggregateKey]*aggregat
 		if err := json.Unmarshal(scanner.Bytes(), &item); err != nil {
 			return nil, fmt.Errorf("decode usage data line %d: %w", line, err)
 		}
-		addUsage(rows, item, location)
+		addUsage(rows, item, location, schedule)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read usage data: %w", err)
@@ -525,15 +532,16 @@ func loadUsage(path string, location *time.Location) (map[aggregateKey]*aggregat
 	return rows, nil
 }
 
-func addUsage(rows map[aggregateKey]*aggregate, item storedUsage, location *time.Location) {
+func addUsage(rows map[aggregateKey]*aggregate, item storedUsage, location *time.Location, schedule rateSchedule) {
 	day := ""
 	if !item.RequestedAt.IsZero() {
 		day = item.RequestedAt.In(location).Format(time.DateOnly)
 	}
-	key := aggregateKey{AuthID: item.AuthID, Model: item.Model, Day: day}
+	period := schedule.period(item.RequestedAt)
+	key := aggregateKey{AuthID: item.AuthID, Model: item.Model, Day: day, Period: period}
 	row := rows[key]
 	if row == nil {
-		row = &aggregate{Provider: item.Provider, AuthType: item.AuthType, AuthID: item.AuthID, Model: item.Model, Day: day}
+		row = &aggregate{Provider: item.Provider, AuthType: item.AuthType, AuthID: item.AuthID, Model: item.Model, Day: day, Period: period}
 		rows[key] = row
 	}
 	if row.Provider == "" {
