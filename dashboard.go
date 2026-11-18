@@ -5,7 +5,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -62,6 +61,8 @@ type accountView struct {
 	Profit           *float64    `json:"profit"`
 	Payback          *float64    `json:"payback"`
 	Note             string      `json:"note"`
+	Batch            string      `json:"batch"`
+	BatchName        string      `json:"batchName"`
 }
 
 type dailyPoint struct {
@@ -155,33 +156,6 @@ func (s *usageStats) add(item aggregate, regularInput int64, cost, multiplier fl
 	}
 }
 
-func defaultAccountSettings() accountSettings {
-	return accountSettings{Multiplier: 1, Channels: map[string]accountOverride{}, Accounts: map[string]accountOverride{}}
-}
-
-// effectiveAccount resolves cost and multiplier: account override, then channel default, then the global multiplier.
-func (s accountSettings) effectiveAccount(id, channel string) (cost *float64, costSource string, multiplier float64, multiplierSource string, note string) {
-	multiplier, multiplierSource = s.Multiplier, "global"
-	if override, ok := s.Channels[channel]; ok {
-		if override.Cost != nil {
-			cost, costSource = override.Cost, "channel"
-		}
-		if override.Multiplier != nil {
-			multiplier, multiplierSource = *override.Multiplier, "channel"
-		}
-	}
-	if override, ok := s.Accounts[id]; ok {
-		if override.Cost != nil {
-			cost, costSource = override.Cost, "account"
-		}
-		if override.Multiplier != nil {
-			multiplier, multiplierSource = *override.Multiplier, "account"
-		}
-		note = override.Note
-	}
-	return cost, costSource, multiplier, multiplierSource, note
-}
-
 func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 	state.RLock()
 	cfg := state.config
@@ -215,7 +189,9 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 			if entry, ok := auths.byKey[id]; ok {
 				applyAuthEntry(view, entry)
 			}
-			view.Cost, view.CostSource, view.Multiplier, view.MultiplierSource, view.Note = settings.effectiveAccount(id, view.Channel)
+			terms := settings.effectiveAccount(id)
+			view.Batch, view.BatchName, view.Note = terms.Batch, terms.BatchName, terms.Note
+			view.Cost, view.CostSource, view.Multiplier, view.MultiplierSource = terms.Cost, terms.CostSource, terms.Multiplier, terms.MultiplierSource
 			accounts[id] = view
 			models[id] = make(map[string]*modelView)
 		}
@@ -428,47 +404,4 @@ func renderDashboardPage(rangeKey string, now time.Time) ([]byte, error) {
 		return nil, fmt.Errorf("encode dashboard: %w", err)
 	}
 	return bytes.Replace(dashboardHTML, dashboardDataMarker, data, 1), nil
-}
-
-func updateAccountSettings(raw string) error {
-	settings := defaultAccountSettings()
-	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
-		return fmt.Errorf("parse account settings: %w", err)
-	}
-	if settings.Multiplier < 0 {
-		return fmt.Errorf("售价倍率不能为负数")
-	}
-	clean := func(in map[string]accountOverride) (map[string]accountOverride, error) {
-		out := make(map[string]accountOverride, len(in))
-		for key, override := range in {
-			key = strings.TrimSpace(key)
-			override.Note = strings.TrimSpace(override.Note)
-			if key == "" || (override.Cost == nil && override.Multiplier == nil && override.Note == "") {
-				continue
-			}
-			if (override.Cost != nil && *override.Cost < 0) || (override.Multiplier != nil && *override.Multiplier < 0) {
-				return nil, fmt.Errorf("%s 的成本或倍率不能为负数", key)
-			}
-			out[key] = override
-		}
-		return out, nil
-	}
-	var err error
-	if settings.Channels, err = clean(settings.Channels); err != nil {
-		return err
-	}
-	if settings.Accounts, err = clean(settings.Accounts); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	state.Lock()
-	defer state.Unlock()
-	if err := os.WriteFile(state.dataFile+".accounts.json", append(data, '\n'), 0o600); err != nil {
-		return fmt.Errorf("save account settings: %w", err)
-	}
-	state.accounts = settings
-	return nil
 }

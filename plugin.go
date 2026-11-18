@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-		"net/http"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,14 +47,14 @@ type modelPrices struct {
 }
 
 type usageRecord struct {
-	Provider    string      `json:"Provider"`
-	AuthType    string      `json:"AuthType"`
-	Model       string      `json:"Model"`
-	Alias       string      `json:"Alias"`
-	AuthID      string      `json:"AuthID"`
-	AuthIndex   string      `json:"AuthIndex"`
-	RequestedAt time.Time   `json:"RequestedAt"`
-	Failed      bool        `json:"Failed"`
+	Provider    string    `json:"Provider"`
+	AuthType    string    `json:"AuthType"`
+	Model       string    `json:"Model"`
+	Alias       string    `json:"Alias"`
+	AuthID      string    `json:"AuthID"`
+	AuthIndex   string    `json:"AuthIndex"`
+	RequestedAt time.Time `json:"RequestedAt"`
+	Failed      bool      `json:"Failed"`
 	Failure     struct {
 		StatusCode int `json:"StatusCode"`
 	} `json:"Failure"`
@@ -105,19 +105,6 @@ type aggregate struct {
 	LastUsed            time.Time
 }
 
-// accountSettings holds the per-credential purchase cost and resale multiplier, with per-channel defaults.
-type accountSettings struct {
-	Multiplier float64                    `json:"multiplier"`
-	Channels   map[string]accountOverride `json:"channels"`
-	Accounts   map[string]accountOverride `json:"accounts"`
-}
-
-type accountOverride struct {
-	Cost       *float64 `json:"cost,omitempty"`
-	Multiplier *float64 `json:"multiplier,omitempty"`
-	Note       string   `json:"note,omitempty"`
-}
-
 var state = struct {
 	sync.RWMutex
 	config   pluginConfig
@@ -159,11 +146,11 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.1.0",
+				"Version":          "1.2.0",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
-					{"Name": "currency", "Type": "string", "Description": "显示货币，例如 USD 或 CNY。"},
+					{"Name": "currency", "Type": "string", "Description": "显示货币，默认 CNY（人民币，模型价格按 1 美元 = 1 元填写）。"},
 					{"Name": "data-file", "Type": "string", "Description": "使用记录 JSONL 文件路径。"},
 					{"Name": "timezone", "Type": "string", "Description": "按天统计使用的时区，例如 Asia/Shanghai；默认使用服务器时区。"},
 					{"Name": "prices", "Type": "object", "Description": "按模型填写每 100 万 token 的输入、输出、缓存读和缓存写价格。"},
@@ -219,6 +206,9 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 		}
 		if len(caller) > 0 {
 			refreshAuthChannels(caller[0])
+		}
+		if err := assignKnownAccounts(); err != nil {
+			return nil, err
 		}
 		rangeKey, _ := query("range")
 		if _, ok := query("api"); ok {
@@ -287,14 +277,14 @@ func refreshAuthChannels(caller hostCaller) {
 }
 
 func applyConfig(raw []byte) error {
-	cfg := pluginConfig{Currency: "USD", DataFile: "usage-quota-stats.jsonl", Prices: make(map[string]modelPrices)}
+	cfg := pluginConfig{Currency: "CNY", DataFile: "usage-quota-stats.jsonl", Prices: make(map[string]modelPrices)}
 	if len(bytes.TrimSpace(raw)) > 0 {
 		if err := yaml.Unmarshal(raw, &cfg); err != nil {
 			return fmt.Errorf("parse plugin config: %w", err)
 		}
 	}
 	if strings.TrimSpace(cfg.Currency) == "" {
-		cfg.Currency = "USD"
+		cfg.Currency = "CNY"
 	}
 	if strings.TrimSpace(cfg.DataFile) == "" {
 		cfg.DataFile = "usage-quota-stats.jsonl"
@@ -326,17 +316,7 @@ func applyConfig(raw []byte) error {
 	if saved, errRead := os.ReadFile(path + ".prices.json"); errRead == nil {
 		_ = json.Unmarshal(saved, &cfg.Prices)
 	}
-	accounts := defaultAccountSettings()
-	if saved, errRead := os.ReadFile(path + ".accounts.json"); errRead == nil {
-		_ = json.Unmarshal(saved, &accounts)
-	}
-	if accounts.Channels == nil {
-		accounts.Channels = map[string]accountOverride{}
-	}
-	if accounts.Accounts == nil {
-		accounts.Accounts = map[string]accountOverride{}
-	}
-	state.accounts = accounts
+	state.accounts = loadAccountSettings(path + ".accounts.json")
 	state.config = cfg
 	return nil
 }
@@ -511,6 +491,9 @@ func recordUsage(record usageRecord) error {
 		return fmt.Errorf("append usage data: %w", errWrite)
 	}
 	addUsage(state.rows, item, state.location)
+	if errAssign := assignNewAccounts(map[string]string{authID: channelForAuth(record.Provider, record.AuthType, authID)}); errAssign != nil {
+		return errAssign
+	}
 	return nil
 }
 
@@ -679,4 +662,3 @@ func errorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(envelope{OK: false, Error: map[string]string{"code": code, "message": message}})
 	return raw
 }
-

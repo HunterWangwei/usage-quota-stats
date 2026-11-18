@@ -72,40 +72,6 @@ func TestDashboardRangesFailuresAndCosts(t *testing.T) {
 	}
 }
 
-func TestAccountSettingsInheritanceAndProfit(t *testing.T) {
-	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
-	path := setupDashboard(t, "prices:\n  '*':\n    input: 1\n",
-		usageRecord{Provider: "codex", Model: "gpt-5.4", AuthID: "codex-a.json", RequestedAt: now, Detail: usageDetail{InputTokens: 100_000_000}},
-		usageRecord{Provider: "codex", Model: "gpt-5.4", AuthID: "codex-b.json", RequestedAt: now, Detail: usageDetail{InputTokens: 100_000_000}},
-	)
-	if err := updateAccountSettings(`{"multiplier":0.5,"channels":{"codex":{"cost":30,"multiplier":0.3}},"accounts":{"codex-b.json":{"cost":20,"note":" 闲鱼 "},"empty":{}}}`); err != nil {
-		t.Fatal(err)
-	}
-	payload := buildDashboard("all", now)
-	a, b := findAccount(t, payload, "codex-a.json"), findAccount(t, payload, "codex-b.json")
-	if a.CostSource != "channel" || *a.Cost != 30 || a.MultiplierSource != "channel" || !near(a.Total.Revenue, 30) || !near(*a.Profit, 0) || !near(*a.Payback, 1) {
-		t.Fatalf("account a = %#v", a)
-	}
-	if b.CostSource != "account" || *b.Cost != 20 || !near(*b.Profit, 10) || b.Note != "闲鱼" {
-		t.Fatalf("account b = %#v", b)
-	}
-	if payload.Summary.CostedAccounts != 2 || !near(payload.Summary.AccountCost, 50) || !near(payload.Summary.Profit, 10) {
-		t.Fatalf("summary = %#v", payload.Summary)
-	}
-	if _, ok := payload.Settings.Accounts["empty"]; ok {
-		t.Fatal("empty overrides should be dropped")
-	}
-	if err := updateAccountSettings(`{"accounts":{"x":{"cost":-1}}}`); err == nil {
-		t.Fatal("negative cost should be rejected")
-	}
-	if err := applyConfig([]byte("data-file: " + path + "\ncurrency: CNY\n")); err != nil {
-		t.Fatal(err)
-	}
-	if got := state.accounts.Accounts["codex-b.json"]; got.Cost == nil || *got.Cost != 20 {
-		t.Fatalf("settings after reload = %#v", state.accounts)
-	}
-}
-
 func TestUnusedListedCredentialsAppear(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	setupDashboard(t, "")
@@ -120,6 +86,9 @@ func TestUnusedListedCredentialsAppear(t *testing.T) {
 	}
 	if !a.Listed || a.Email != "new@example.com" || !a.Disabled || a.Channel != "xai" || a.LastUsed != nil {
 		t.Fatalf("listed account = %#v", a)
+	}
+	if payload.Currency != "CNY" {
+		t.Fatalf("default currency = %q, want CNY", payload.Currency)
 	}
 	if len(payload.Daily) != 7 {
 		t.Fatalf("today chart should cover 7 days, got %d", len(payload.Daily))
@@ -157,5 +126,102 @@ func TestLegacyRecordsLoadIntoDayBuckets(t *testing.T) {
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	if a := findAccount(t, buildDashboard("today", now), "a"); a.Range.Requests != 1 || a.Total.Requests != 2 {
 		t.Fatalf("legacy buckets: range %d total %d", a.Range.Requests, a.Total.Requests)
+	}
+}
+
+func codexUse(id string, at time.Time) usageRecord {
+	return usageRecord{Provider: "codex", Model: "gpt-5.4", AuthID: id, RequestedAt: at, Detail: usageDetail{InputTokens: 100_000_000}}
+}
+
+func recordAll(t *testing.T, records ...usageRecord) {
+	t.Helper()
+	for _, record := range records {
+		raw, _ := json.Marshal(record)
+		if _, err := handleMethod("usage.handle", raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestNewBatchDoesNotChangeEarlierAccounts(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	path := setupDashboard(t, "prices:\n  '*':\n    input: 1\n", codexUse("codex-old.json", now))
+	// Batch 1 becomes the codex default: the already-seen, unassigned credential joins it on the next page load.
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30,"multiplier":0.3}},"defaultBatch":{"codex":"b1"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handleMethod("management.handle", []byte(`{"Query":{"api":["1"]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Batch 2 with higher cost and multiplier becomes the default; only credentials seen afterwards use it.
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30,"multiplier":0.3},"b2":{"name":"第二批","cost":60,"multiplier":0.8}},"defaultBatch":{"codex":"b2"},"accounts":{"codex-old.json":{"batch":"b1"}}}`); err != nil {
+		t.Fatal(err)
+	}
+	recordAll(t, codexUse("codex-new.json", now))
+	payload := buildDashboard("all", now)
+	old, fresh := findAccount(t, payload, "codex-old.json"), findAccount(t, payload, "codex-new.json")
+	if old.Batch != "b1" || *old.Cost != 30 || old.Multiplier != 0.3 || !near(*old.Profit, 0) || old.BatchName != "第一批" {
+		t.Fatalf("old account changed: %#v", old)
+	}
+	if fresh.Batch != "b2" || *fresh.Cost != 60 || !near(fresh.Total.Revenue, 80) || !near(*fresh.Profit, 20) {
+		t.Fatalf("new account = %#v", fresh)
+	}
+	// A per-account override wins over its batch.
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30,"multiplier":0.3},"b2":{"name":"第二批","cost":60,"multiplier":0.8}},"defaultBatch":{"codex":"b2"},"accounts":{"codex-old.json":{"batch":"b1","cost":10}}}`); err != nil {
+		t.Fatal(err)
+	}
+	if old = findAccount(t, buildDashboard("all", now), "codex-old.json"); *old.Cost != 10 || old.CostSource != "account" || old.MultiplierSource != "batch" {
+		t.Fatalf("override = %#v", old)
+	}
+	// The page did not send codex-new.json, but its assignment must survive the save and a reload.
+	if err := applyConfig([]byte("data-file: " + path + "\ntimezone: Asia/Shanghai\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := state.accounts.Accounts["codex-new.json"].Batch; got != "b2" {
+		t.Fatalf("new account batch after reload = %q", got)
+	}
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"","cost":1}}}`); err == nil {
+		t.Fatal("empty batch name should be rejected")
+	}
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"x","cost":-1}}}`); err == nil {
+		t.Fatal("negative batch cost should be rejected")
+	}
+}
+
+func TestUnassignedAccountStaysOutOfLaterDefault(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	setupDashboard(t, "", codexUse("codex-a.json", now))
+	// The user explicitly keeps codex-a.json out of any batch.
+	if err := updateAccountSettings(`{"batches":{"b1":{"name":"第一批","cost":30}},"defaultBatch":{"codex":"b1"},"accounts":{"codex-a.json":{}}}`); err != nil {
+		t.Fatal(err)
+	}
+	recordAll(t, codexUse("codex-a.json", now))
+	if a := findAccount(t, buildDashboard("all", now), "codex-a.json"); a.Batch != "" || a.Cost != nil {
+		t.Fatalf("explicitly unassigned account was moved: %#v", a)
+	}
+}
+
+func TestLegacyChannelDefaultsMigrateToBatches(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	path := t.TempDir() + "/usage.jsonl"
+	legacy := `{"multiplier":0.5,"channels":{"codex":{"cost":50}},"accounts":{"codex-x.json":{"cost":20}}}`
+	if err := os.WriteFile(path+".accounts.json", []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyConfig([]byte("data-file: " + path + "\nprices:\n  '*':\n    input: 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	recordAll(t, codexUse("codex-y.json", now), codexUse("codex-x.json", now))
+	payload := buildDashboard("all", now)
+	x, y := findAccount(t, payload, "codex-x.json"), findAccount(t, payload, "codex-y.json")
+	// codex-y inherited channel cost 50 and global ×0.5 in 1.1.0; codex-x had its own cost 20 on top of that.
+	if y.Batch != "migrated-codex" || *y.Cost != 50 || y.Multiplier != 0.5 || !near(*y.Profit, 0) {
+		t.Fatalf("migrated account = %#v", y)
+	}
+	if x.Batch != "migrated-codex" || *x.Cost != 20 || x.CostSource != "account" || x.Multiplier != 0.5 || !near(*x.Profit, 30) {
+		t.Fatalf("pre-configured account = %#v", x)
+	}
+	if payload.Settings.LegacyChannels != nil || payload.Settings.LegacyMultiplier != nil || len(payload.Settings.LegacyAccounts) != 0 {
+		t.Fatalf("legacy fields should be cleared after migration: %#v", payload.Settings)
 	}
 }
