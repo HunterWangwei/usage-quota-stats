@@ -9,34 +9,36 @@ import (
 	"time"
 )
 
-// accountSettings stores purchase batches, per-credential assignments and the resale multiplier timeline.
-// A credential's cost comes from the batch it was assigned to and never changes when later batches arrive.
-// The multiplier is a global selling price that changes over time: every request is valued at the
-// multiplier in effect when it was made, for all credentials alike.
+// accountSettings stores purchase records, per-credential assignments and one resale multiplier timeline per
+// channel. A credential's cost comes from the purchase record it was entered with and never changes when later
+// purchases arrive. The multiplier is the channel's selling price over time: every request is valued at its
+// channel's multiplier in effect when the request was made.
 type accountSettings struct {
 	Batches      map[string]batchSettings   `json:"batches"`
-	DefaultBatch map[string]string          `json:"defaultBatch"` // channel -> batch ID for newly seen credentials
 	Accounts     map[string]accountOverride `json:"accounts"`
-	Rates        []rateChange               `json:"rates"`
+	ChannelRates map[string][]rateChange    `json:"channelRates"`
 
-	// Fields from v1.1.0, converted when loaded.
-	LegacyMultiplier *float64                   `json:"multiplier,omitempty"`
-	LegacyChannels   map[string]accountOverride `json:"channels,omitempty"`
-	// LegacyAccounts holds 1.1.0 per-account overrides until the credential is seen again and its channel is known.
-	LegacyAccounts map[string]accountOverride `json:"legacyAccounts,omitempty"`
+	// Fields from earlier versions, converted when loaded.
+	LegacyRates        []rateChange               `json:"rates,omitempty"`        // v1.3.0 global timeline
+	LegacyDefaultBatch map[string]string          `json:"defaultBatch,omitempty"` // v1.2.0/v1.3.0
+	LegacyMultiplier   *float64                   `json:"multiplier,omitempty"`   // v1.1.0
+	LegacyChannels     map[string]accountOverride `json:"channels,omitempty"`     // v1.1.0
+	LegacyAccounts     map[string]accountOverride `json:"legacyAccounts,omitempty"`
 }
 
+// batchSettings is a purchase record created when new credentials are entered.
 type batchSettings struct {
-	Name string   `json:"name"`
-	Date string   `json:"date,omitempty"`
-	Cost *float64 `json:"cost,omitempty"`
-	Note string   `json:"note,omitempty"`
-	// LegacyMultiplier is the v1.2.0 per-batch multiplier, converted into the rate timeline when loaded.
+	Name    string   `json:"name"`
+	Channel string   `json:"channel,omitempty"`
+	Date    string   `json:"date,omitempty"`
+	Cost    *float64 `json:"cost,omitempty"`
+	Note    string   `json:"note,omitempty"`
+	// LegacyMultiplier is the v1.2.0 per-batch multiplier, converted into rate timelines when loaded.
 	LegacyMultiplier *float64 `json:"multiplier,omitempty"`
 }
 
-// accountOverride assigns a credential to a batch. An entry existing at all means the credential has been
-// assigned (possibly to no batch), so it is never re-assigned to a later default batch.
+// accountOverride records a credential's purchase. An entry existing at all means the credential has been
+// entered (possibly without cost); credentials without an entry are new and wait for their cost.
 type accountOverride struct {
 	Batch            string   `json:"batch,omitempty"`
 	Cost             *float64 `json:"cost,omitempty"`
@@ -44,44 +46,77 @@ type accountOverride struct {
 	LegacyMultiplier *float64 `json:"multiplier,omitempty"` // v1.1.0/v1.2.0 only; ignored after migration
 }
 
-// rateChange sets the resale multiplier from a moment on. The first entry has an empty From and applies to
-// everything before the first change.
+// rateChange sets a channel's resale multiplier from a moment on. The first entry has an empty From and
+// applies to everything before the first change.
 type rateChange struct {
 	From       string  `json:"from"`
 	Multiplier float64 `json:"multiplier"`
 	Note       string  `json:"note,omitempty"`
 }
 
-// rateSchedule is the parsed timeline: period i covers [starts[i-1], starts[i]) with multipliers[i].
-type rateSchedule struct {
+// channelTimeline is one channel's parsed timeline: multipliers[i] applies from starts[i-1] (or the beginning).
+type channelTimeline struct {
 	starts      []time.Time
 	multipliers []float64
+}
+
+func (c channelTimeline) index(at time.Time) int {
+	if at.IsZero() {
+		return 0
+	}
+	return sort.Search(len(c.starts), func(i int) bool { return c.starts[i].After(at) })
+}
+
+// rateSchedule buckets requests by the union of every channel's change times, so the multiplier of a bucket
+// is known for whichever channel its credential belongs to, even if that classification changes later.
+type rateSchedule struct {
+	boundaries []time.Time
+	channels   map[string]channelTimeline
 }
 
 func (s rateSchedule) period(at time.Time) int {
 	if at.IsZero() {
 		return 0
 	}
-	return sort.Search(len(s.starts), func(i int) bool { return s.starts[i].After(at) })
+	return sort.Search(len(s.boundaries), func(i int) bool { return s.boundaries[i].After(at) })
 }
 
-func (s rateSchedule) multiplier(period int) float64 {
-	if period < 0 || period >= len(s.multipliers) {
+func (s rateSchedule) periodStart(period int) time.Time {
+	if period <= 0 || period > len(s.boundaries) {
+		return time.Time{}
+	}
+	return s.boundaries[period-1]
+}
+
+func (s rateSchedule) periods() int { return len(s.boundaries) + 1 }
+
+// channelIndex is the position in the channel's own timeline that covers the given bucket, or -1.
+func (s rateSchedule) channelIndex(channel string, period int) int {
+	timeline, ok := s.channels[channel]
+	if !ok {
+		return -1
+	}
+	return timeline.index(s.periodStart(period))
+}
+
+func (s rateSchedule) multiplier(channel string, period int) float64 {
+	index := s.channelIndex(channel, period)
+	if index < 0 {
 		return 1
 	}
-	return s.multipliers[period]
+	return s.channels[channel].multipliers[index]
 }
 
 func (s rateSchedule) key() string {
-	parts := make([]string, len(s.starts))
-	for i, start := range s.starts {
+	parts := make([]string, len(s.boundaries))
+	for i, start := range s.boundaries {
 		parts[i] = start.UTC().Format(time.RFC3339Nano)
 	}
 	return strings.Join(parts, ",")
 }
 
-// parseRates validates the timeline, sorts it and normalizes times to RFC3339 in the given location.
-func parseRates(rates []rateChange, location *time.Location) ([]rateChange, rateSchedule, error) {
+// parseChannelRates validates one channel's timeline, sorts it and normalizes times to the given location.
+func parseChannelRates(rates []rateChange, location *time.Location) ([]rateChange, channelTimeline, error) {
 	if len(rates) == 0 {
 		rates = []rateChange{{Multiplier: 1}}
 	}
@@ -90,24 +125,24 @@ func parseRates(rates []rateChange, location *time.Location) ([]rateChange, rate
 	for i, rate := range rates {
 		rate.From, rate.Note = strings.TrimSpace(rate.From), strings.TrimSpace(rate.Note)
 		if rate.Multiplier < 0 {
-			return nil, rateSchedule{}, fmt.Errorf("售价倍率不能为负数")
+			return nil, channelTimeline{}, fmt.Errorf("售价倍率不能为负数")
 		}
 		if rate.From == "" {
 			if initial >= 0 {
-				return nil, rateSchedule{}, fmt.Errorf("只能有一个初始倍率")
+				return nil, channelTimeline{}, fmt.Errorf("只能有一个初始倍率")
 			}
 			initial = i
 		} else {
 			at, err := time.Parse(time.RFC3339, rate.From)
 			if err != nil {
-				return nil, rateSchedule{}, fmt.Errorf("倍率生效时间 %q 格式不正确", rate.From)
+				return nil, channelTimeline{}, fmt.Errorf("倍率生效时间 %q 格式不正确", rate.From)
 			}
 			rate.From = at.In(location).Format(time.RFC3339)
 		}
 		out = append(out, rate)
 	}
 	if initial < 0 {
-		return nil, rateSchedule{}, fmt.Errorf("缺少初始倍率")
+		return nil, channelTimeline{}, fmt.Errorf("缺少初始倍率")
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].From == "" || out[j].From == "" {
@@ -117,22 +152,48 @@ func parseRates(rates []rateChange, location *time.Location) ([]rateChange, rate
 		b, _ := time.Parse(time.RFC3339, out[j].From)
 		return a.Before(b)
 	})
-	schedule := rateSchedule{multipliers: []float64{out[0].Multiplier}}
+	timeline := channelTimeline{multipliers: []float64{out[0].Multiplier}}
 	for _, rate := range out[1:] {
 		at, _ := time.Parse(time.RFC3339, rate.From)
-		if n := len(schedule.starts); n > 0 && !at.After(schedule.starts[n-1]) {
-			return nil, rateSchedule{}, fmt.Errorf("两次调价的生效时间不能相同")
+		if n := len(timeline.starts); n > 0 && !at.After(timeline.starts[n-1]) {
+			return nil, channelTimeline{}, fmt.Errorf("同一渠道两次调价的生效时间不能相同")
 		}
-		schedule.starts = append(schedule.starts, at)
-		schedule.multipliers = append(schedule.multipliers, rate.Multiplier)
+		timeline.starts = append(timeline.starts, at)
+		timeline.multipliers = append(timeline.multipliers, rate.Multiplier)
 	}
+	return out, timeline, nil
+}
+
+func parseRates(all map[string][]rateChange, location *time.Location) (map[string][]rateChange, rateSchedule, error) {
+	out := make(map[string][]rateChange, len(all))
+	schedule := rateSchedule{channels: make(map[string]channelTimeline, len(all))}
+	seen := make(map[int64]bool)
+	for channel, rates := range all {
+		channel = strings.TrimSpace(channel)
+		if channel == "" {
+			continue
+		}
+		normalized, timeline, err := parseChannelRates(rates, location)
+		if err != nil {
+			return nil, rateSchedule{}, fmt.Errorf("%s：%w", channelLabel(channel), err)
+		}
+		out[channel] = normalized
+		schedule.channels[channel] = timeline
+		for _, start := range timeline.starts {
+			if !seen[start.UnixNano()] {
+				seen[start.UnixNano()] = true
+				schedule.boundaries = append(schedule.boundaries, start)
+			}
+		}
+	}
+	sort.Slice(schedule.boundaries, func(i, j int) bool { return schedule.boundaries[i].Before(schedule.boundaries[j]) })
 	return out, schedule, nil
 }
 
 var knownChannels = []string{"antigravity", "gemini", "codex", "xai"}
 
 func defaultAccountSettings() accountSettings {
-	return accountSettings{Batches: map[string]batchSettings{}, DefaultBatch: map[string]string{}, Accounts: map[string]accountOverride{}}
+	return accountSettings{Batches: map[string]batchSettings{}, Accounts: map[string]accountOverride{}, ChannelRates: map[string][]rateChange{}}
 }
 
 func loadAccountSettings(path string, location *time.Location) (accountSettings, rateSchedule) {
@@ -143,65 +204,53 @@ func loadAccountSettings(path string, location *time.Location) (accountSettings,
 	if settings.Batches == nil {
 		settings.Batches = map[string]batchSettings{}
 	}
-	if settings.DefaultBatch == nil {
-		settings.DefaultBatch = map[string]string{}
-	}
 	if settings.Accounts == nil {
 		settings.Accounts = map[string]accountOverride{}
 	}
+	if settings.ChannelRates == nil {
+		settings.ChannelRates = map[string][]rateChange{}
+	}
 	migrateLegacySettings(&settings)
 	migrateBatchMultipliers(&settings, location)
-	rates, schedule, err := parseRates(settings.Rates, location)
+	migrateGlobalRates(&settings)
+	rates, schedule, err := parseRates(settings.ChannelRates, location)
 	if err != nil {
 		rates, schedule, _ = parseRates(nil, location)
 	}
-	settings.Rates = rates
+	settings.ChannelRates = rates
 	return settings, schedule
 }
 
-// migrateLegacySettings turns v1.1.0 channel defaults (and a non-default global multiplier) into batches that
-// are the default for their channel, so credentials that inherited them keep the same numbers once assigned.
+// migrateLegacySettings turns v1.1.0 channel defaults into purchase records and its multipliers into each
+// channel's initial rate. Credentials that only inherited a channel default are asked for their cost again.
 func migrateLegacySettings(s *accountSettings) {
+	if s.LegacyChannels == nil && s.LegacyMultiplier == nil {
+		return
+	}
 	global := 1.0
 	if s.LegacyMultiplier != nil {
 		global = *s.LegacyMultiplier
 	}
-	if s.LegacyChannels == nil && s.LegacyMultiplier == nil {
-		return
-	}
-	if s.LegacyAccounts == nil {
-		s.LegacyAccounts = map[string]accountOverride{}
-	}
-	for id, override := range s.Accounts {
-		if override.Batch == "" {
-			s.LegacyAccounts[id] = override
-			delete(s.Accounts, id)
+	for _, channel := range knownChannels {
+		multiplier := global
+		if legacy, ok := s.LegacyChannels[channel]; ok && legacy.LegacyMultiplier != nil {
+			multiplier = *legacy.LegacyMultiplier
+		}
+		if _, ok := s.ChannelRates[channel]; !ok && (multiplier != 1 || s.LegacyChannels[channel].LegacyMultiplier != nil) {
+			s.ChannelRates[channel] = []rateChange{{Multiplier: multiplier, Note: "从 1.1.0 迁移"}}
 		}
 	}
 	for channel, legacy := range s.LegacyChannels {
-		multiplier := legacy.LegacyMultiplier
-		if multiplier == nil && global != 1 {
-			multiplier = &global
-		}
-		id := "migrated-" + channel
-		s.Batches[id] = batchSettings{Name: channelLabel(channel) + " 默认（1.1.0 迁移）", Cost: legacy.Cost, LegacyMultiplier: multiplier}
-		s.DefaultBatch[channel] = id
-	}
-	if global != 1 {
-		for _, channel := range knownChannels {
-			if _, ok := s.DefaultBatch[channel]; !ok {
-				value := global
-				s.Batches["migrated-global"] = batchSettings{Name: "全局倍率（1.1.0 迁移）", LegacyMultiplier: &value}
-				s.DefaultBatch[channel] = "migrated-global"
-			}
+		if legacy.Cost != nil {
+			s.Batches["migrated-"+channel] = batchSettings{Name: channelLabel(channel) + " 默认（1.1.0 迁移）", Channel: channel, Cost: legacy.Cost}
 		}
 	}
 	s.LegacyMultiplier, s.LegacyChannels = nil, nil
 }
 
-// migrateBatchMultipliers converts v1.2.0 per-batch multipliers into the global rate timeline: the earliest
-// batch's multiplier becomes the initial rate and each later batch with a different multiplier starts a new
-// rate at the beginning of its purchase date. Per-account multiplier overrides no longer exist.
+// migrateBatchMultipliers converts v1.2.0 per-batch multipliers into a global timeline (handled further by
+// migrateGlobalRates): the earliest batch's multiplier is the initial rate and each later batch with a different
+// multiplier starts a new rate at the beginning of its purchase date.
 func migrateBatchMultipliers(s *accountSettings, location *time.Location) {
 	type dated struct {
 		date       string
@@ -215,15 +264,13 @@ func migrateBatchMultipliers(s *accountSettings, location *time.Location) {
 			s.Batches[id] = batch
 		}
 	}
-	for id, override := range s.Accounts {
-		override.LegacyMultiplier = nil
-		s.Accounts[id] = override
+	for _, overrides := range []map[string]accountOverride{s.Accounts, s.LegacyAccounts} {
+		for id, override := range overrides {
+			override.LegacyMultiplier = nil
+			overrides[id] = override
+		}
 	}
-	for id, override := range s.LegacyAccounts {
-		override.LegacyMultiplier = nil
-		s.LegacyAccounts[id] = override
-	}
-	if len(s.Rates) > 0 || len(found) == 0 {
+	if len(s.LegacyRates) > 0 || len(found) == 0 {
 		return
 	}
 	sort.SliceStable(found, func(i, j int) bool {
@@ -242,7 +289,26 @@ func migrateBatchMultipliers(s *accountSettings, location *time.Location) {
 		rates = append(rates, rateChange{From: day.Format(time.RFC3339), Multiplier: item.multiplier, Note: "从 1.2.0 批次倍率迁移"})
 		current = item.multiplier
 	}
-	s.Rates = rates
+	s.LegacyRates = rates
+}
+
+// migrateGlobalRates copies the v1.3.0 global timeline to every channel without its own timeline, keeping the
+// numbers unchanged until each channel's rates are corrected. Pending default batches and 1.1.0 overrides are
+// folded in: from v1.4.0 on, new credentials are entered through the new-account prompt instead.
+func migrateGlobalRates(s *accountSettings) {
+	if len(s.LegacyRates) > 0 {
+		for _, channel := range knownChannels {
+			if _, ok := s.ChannelRates[channel]; !ok {
+				s.ChannelRates[channel] = append([]rateChange(nil), s.LegacyRates...)
+			}
+		}
+	}
+	for id, override := range s.LegacyAccounts {
+		if _, ok := s.Accounts[id]; !ok {
+			s.Accounts[id] = override
+		}
+	}
+	s.LegacyRates, s.LegacyDefaultBatch, s.LegacyAccounts = nil, nil, nil
 }
 
 func channelLabel(channel string) string {
@@ -259,9 +325,10 @@ func channelLabel(channel string) string {
 	return channel
 }
 
-// effectiveAccount resolves the purchase cost: the account's own cost, otherwise its batch's cost.
+// effectiveAccount resolves the purchase cost: the account's own cost, otherwise its purchase record's cost.
 func (s accountSettings) effectiveAccount(id string) (view accountTerms) {
-	override := s.Accounts[id]
+	override, entered := s.Accounts[id]
+	view.Pending = !entered
 	view.Batch, view.Note = override.Batch, override.Note
 	if batch, ok := s.Batches[override.Batch]; ok {
 		view.BatchName = batch.Name
@@ -280,33 +347,7 @@ func (s accountSettings) effectiveAccount(id string) (view accountTerms) {
 type accountTerms struct {
 	Batch, BatchName, CostSource, Note string
 	Cost                               *float64
-}
-
-// assignNewAccounts puts credentials seen for the first time into their channel's current default batch and
-// persists the assignment. The caller must hold state's write lock.
-func assignNewAccounts(channels map[string]string) error {
-	changed := false
-	for id, channel := range channels {
-		if _, seen := state.accounts.Accounts[id]; seen || strings.TrimSpace(id) == "" {
-			continue
-		}
-		legacy, isLegacy := state.accounts.LegacyAccounts[id]
-		batch := state.accounts.DefaultBatch[channel]
-		if _, exists := state.accounts.Batches[batch]; !exists {
-			if !isLegacy {
-				continue
-			}
-			batch = ""
-		}
-		legacy.Batch = batch
-		state.accounts.Accounts[id] = legacy
-		delete(state.accounts.LegacyAccounts, id)
-		changed = true
-	}
-	if !changed || state.dataFile == "" {
-		return nil
-	}
-	return saveAccountSettingsLocked(state.accounts)
+	Pending                            bool
 }
 
 func saveAccountSettingsLocked(settings accountSettings) error {
@@ -334,19 +375,13 @@ func updateAccountSettings(raw string) error {
 			continue
 		}
 		if batch.Name == "" {
-			return fmt.Errorf("批次名称不能为空")
+			return fmt.Errorf("进货记录名称不能为空")
 		}
 		if negative(batch.Cost) {
-			return fmt.Errorf("批次 %s 的成本不能为负数", batch.Name)
+			return fmt.Errorf("%s 的成本不能为负数", batch.Name)
 		}
 		batch.LegacyMultiplier = nil
 		batches[id] = batch
-	}
-	defaults := make(map[string]string, len(settings.DefaultBatch))
-	for channel, id := range settings.DefaultBatch {
-		if _, ok := batches[id]; ok && strings.TrimSpace(channel) != "" {
-			defaults[strings.TrimSpace(channel)] = id
-		}
 	}
 	accounts := make(map[string]accountOverride, len(settings.Accounts))
 	for id, override := range settings.Accounts {
@@ -366,12 +401,12 @@ func updateAccountSettings(raw string) error {
 	}
 	state.Lock()
 	defer state.Unlock()
-	rates, schedule, err := parseRates(settings.Rates, state.location)
+	rates, schedule, err := parseRates(settings.ChannelRates, state.location)
 	if err != nil {
 		return err
 	}
-	settings = accountSettings{Batches: batches, DefaultBatch: defaults, Accounts: accounts, Rates: rates}
-	// Keep assignments made since the page was loaded (credentials first used meanwhile).
+	settings = accountSettings{Batches: batches, Accounts: accounts, ChannelRates: rates}
+	// Keep credentials entered since the page was loaded (through the new-account prompt in another tab).
 	for id, override := range state.accounts.Accounts {
 		if _, ok := settings.Accounts[id]; !ok {
 			if _, exists := batches[override.Batch]; !exists {
@@ -380,17 +415,15 @@ func updateAccountSettings(raw string) error {
 			settings.Accounts[id] = override
 		}
 	}
-	for id, override := range state.accounts.LegacyAccounts {
-		if _, ok := settings.Accounts[id]; !ok {
-			if settings.LegacyAccounts == nil {
-				settings.LegacyAccounts = map[string]accountOverride{}
-			}
-			settings.LegacyAccounts[id] = override
-		}
-	}
-	// Requests are bucketed by rate period, so a changed timeline needs the raw records re-read.
+	return commitAccountSettingsLocked(settings, schedule)
+}
+
+// commitAccountSettingsLocked saves settings and, when the multiplier change times moved, rebuilds the usage
+// buckets from the raw records. The caller must hold state's write lock.
+func commitAccountSettingsLocked(settings accountSettings, schedule rateSchedule) error {
 	rows := state.rows
 	if schedule.key() != state.schedule.key() && state.dataFile != "" {
+		var err error
 		if rows, err = loadUsage(state.dataFile, state.location, schedule); err != nil {
 			return err
 		}
@@ -404,22 +437,60 @@ func updateAccountSettings(raw string) error {
 	return nil
 }
 
-// assignKnownAccounts runs first-seen batch assignment for every credential with usage or listed by the host.
-func assignKnownAccounts() error {
-	channels := make(map[string]string)
-	for _, entry := range authSnapshot().entries {
-		id := entry.ID
-		if id == "" {
-			id = entry.Name
-		}
-		channels[id] = usageChannel(entry.Provider, entry.Type, entry.ID+" "+entry.Name)
+// newAccountEntry is one credential submitted from the new-account prompt.
+type newAccountEntry struct {
+	ID      string   `json:"id"`
+	Channel string   `json:"channel"`
+	Cost    *float64 `json:"cost"` // nil records the credential without cost
+	Note    string   `json:"note"`
+}
+
+// enterNewAccounts records the purchase of newly detected credentials. Credentials of the same channel and
+// cost entered together become one purchase record named after the channel and date.
+func enterNewAccounts(raw string, now time.Time) error {
+	var entries []newAccountEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return fmt.Errorf("parse new accounts: %w", err)
 	}
 	state.Lock()
 	defer state.Unlock()
-	for _, row := range state.rows {
-		if _, ok := channels[row.AuthID]; !ok {
-			channels[row.AuthID] = channelForAuth(row.Provider, row.AuthType, row.AuthID)
-		}
+	settings := state.accounts
+	batches := make(map[string]batchSettings, len(settings.Batches)+1)
+	for id, batch := range settings.Batches {
+		batches[id] = batch
 	}
-	return assignNewAccounts(channels)
+	accounts := make(map[string]accountOverride, len(settings.Accounts)+len(entries))
+	for id, override := range settings.Accounts {
+		accounts[id] = override
+	}
+	day := now.In(state.location)
+	groups := make(map[string]string) // channel + cost -> batch ID
+	for i, entry := range entries {
+		entry.ID, entry.Channel, entry.Note = strings.TrimSpace(entry.ID), strings.TrimSpace(entry.Channel), strings.TrimSpace(entry.Note)
+		if entry.ID == "" {
+			continue
+		}
+		if entry.Cost != nil && *entry.Cost < 0 {
+			return fmt.Errorf("%s 的成本不能为负数", entry.ID)
+		}
+		override := accountOverride{Note: entry.Note}
+		if entry.Cost != nil {
+			key := entry.Channel + "|" + fmt.Sprint(*entry.Cost)
+			batchID, ok := groups[key]
+			if !ok {
+				batchID = fmt.Sprintf("p%s-%d", day.Format("20060102150405"), i)
+				cost := *entry.Cost
+				batches[batchID] = batchSettings{Name: fmt.Sprintf("%s %s 进货 ¥%s", channelLabel(entry.Channel), day.Format("01-02"), formatAmount(cost)), Channel: entry.Channel, Date: day.Format(time.DateOnly), Cost: &cost}
+				groups[key] = batchID
+			}
+			override.Batch = batchID
+		}
+		accounts[entry.ID] = override
+	}
+	settings.Batches, settings.Accounts = batches, accounts
+	return commitAccountSettingsLocked(settings, state.schedule)
+}
+
+func formatAmount(value float64) string {
+	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.2f", value), "0"), ".")
 }

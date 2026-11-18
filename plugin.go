@@ -150,7 +150,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.3.0",
+				"Version":          "1.4.0",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -202,6 +202,12 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			}
 			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})
 		}
+		if raw, ok := query("new_accounts"); ok {
+			if err := enterNewAccounts(raw, time.Now()); err != nil {
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})
+		}
 		if raw, ok := query("accounts"); ok {
 			if err := updateAccountSettings(raw); err != nil {
 				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -210,9 +216,6 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 		}
 		if len(caller) > 0 {
 			refreshAuthChannels(caller[0])
-		}
-		if err := assignKnownAccounts(); err != nil {
-			return nil, err
 		}
 		rangeKey, _ := query("range")
 		if _, ok := query("api"); ok {
@@ -498,9 +501,6 @@ func recordUsage(record usageRecord) error {
 		return fmt.Errorf("append usage data: %w", errWrite)
 	}
 	addUsage(state.rows, item, state.location, state.schedule)
-	if errAssign := assignNewAccounts(map[string]string{authID: channelForAuth(record.Provider, record.AuthType, authID)}); errAssign != nil {
-		return errAssign
-	}
 	return nil
 }
 
