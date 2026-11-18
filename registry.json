@@ -6,7 +6,7 @@
       "name": "配置额度统计",
       "description": "按凭据配置和模型统计 Token、费用、缓存命中率和失败率；新账号自动弹窗录入成本，售价倍率按渠道分时间线计算利润与回本率，支持账号下架；自动备份设置与数据，支持时间范围筛选、趋势图和 CSV 导出。",
       "author": "HunterWangwei",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "repository": "https://github.com/HunterWangwei/usage-quota-stats",
       "homepage": "https://github.com/HunterWangwei/usage-quota-stats",
       "license": "MIT",
@@ -17,30 +17,30 @@
           {
             "goos": "linux",
             "goarch": "amd64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.0/usage-quota-stats_1.5.0_linux_amd64.zip",
-            "sha256": "89a166f139fddcd177474e932666c975c12dc0dc8b964d853a091f3a1852785d",
-            "size": 4107351
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.1/usage-quota-stats_1.5.1_linux_amd64.zip",
+            "sha256": "a106cd2b4e4be3d5ef01d34e8ce1ff635f8fb6268305a2a86ae0f0aa3f8261b5",
+            "size": 4105790
           },
           {
             "goos": "linux",
             "goarch": "arm64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.0/usage-quota-stats_1.5.0_linux_arm64.zip",
-            "sha256": "6c38cb5ef8e77b0af776d5c519d6f9871a6a2a9963cf4f9919fbd2d06efc3e9a",
-            "size": 3742875
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.1/usage-quota-stats_1.5.1_linux_arm64.zip",
+            "sha256": "8ad718e0fd279ac302c213ebbee3797ce52dbc5103e5fd22bd4b27ad57f24988",
+            "size": 3741724
           },
           {
             "goos": "windows",
             "goarch": "amd64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.0/usage-quota-stats_1.5.0_windows_amd64.zip",
-            "sha256": "2e5676f9d98fdeb1a136fc9d296630d1b13460355774ecb3f2ff0043e7133c56",
-            "size": 3913060
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.1/usage-quota-stats_1.5.1_windows_amd64.zip",
+            "sha256": "49dd256b74f4de0c641613fb0b00364a2b6f69eeb6d2ecddb4df883eac499133",
+            "size": 3910358
           },
           {
             "goos": "darwin",
             "goarch": "arm64",
-            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.0/usage-quota-stats_1.5.0_darwin_arm64.zip",
-            "sha256": "b0b564f9f8751e467a3a9efdbbf3d4792fecc012c1affff2cbec7e1c8b80928a",
-            "size": 2163809
+            "url": "https://github.com/HunterWangwei/usage-quota-stats/releases/download/v1.5.1/usage-quota-stats_1.5.1_darwin_arm64.zip",
+            "sha256": "e074b04729fc2d960655e551b0cd6c312f128d04238a2aa7ed60564a97054fb7",
+            "size": 2164259
           }
         ]
       }
