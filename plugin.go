@@ -150,7 +150,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.4.0",
+				"Version":          "1.5.0",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -170,6 +170,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 		if err := recordUsage(record); err != nil {
 			return nil, err
 		}
+		maybeDailyBackup(time.Now())
 		return okEnvelope(struct{}{})
 	case "management.register":
 		return okEnvelope(map[string]any{
@@ -202,6 +203,38 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			}
 			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})
 		}
+		if _, ok := query("backups"); ok {
+			return jsonResponse(http.StatusOK, listBackups())
+		}
+		if _, ok := query("backup_now"); ok {
+			name, err := createManualBackup(time.Now())
+			if err != nil {
+				return jsonResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			}
+			return jsonResponse(http.StatusOK, map[string]string{"name": name})
+		}
+		if name, ok := query("backup_download"); ok {
+			data, fileName, err := readBackup(name)
+			if err != nil {
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			contentType := "application/zip"
+			if strings.HasSuffix(fileName, ".json") {
+				contentType = "application/octet-stream"
+			}
+			return okEnvelope(map[string]any{
+				"StatusCode": http.StatusOK,
+				"Headers": map[string][]string{"Content-Type": {contentType}, "Cache-Control": {"no-store"},
+					"Content-Disposition": {`attachment; filename="` + fileName + `"`}},
+				"Body": data,
+			})
+		}
+		if name, ok := query("backup_restore"); ok {
+			if err := restoreSettingsBackup(name); err != nil {
+				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
+			}
+			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})
+		}
 		if raw, ok := query("new_accounts"); ok {
 			if err := enterNewAccounts(raw, time.Now()); err != nil {
 				return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -217,6 +250,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 		if len(caller) > 0 {
 			refreshAuthChannels(caller[0])
 		}
+		maybeDailyBackup(time.Now())
 		rangeKey, _ := query("range")
 		if _, ok := query("api"); ok {
 			return jsonResponse(http.StatusOK, buildDashboard(rangeKey, time.Now()))
@@ -357,6 +391,7 @@ func updatePrices(raw string) error {
 	if err != nil {
 		return err
 	}
+	versionSettingsLocked("prices")
 	if err := os.WriteFile(state.dataFile+".prices.json", append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("save prices: %w", err)
 	}

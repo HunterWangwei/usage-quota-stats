@@ -60,6 +60,8 @@ type accountView struct {
 	Payback       *float64    `json:"payback"`
 	Note          string      `json:"note"`
 	Pending       bool        `json:"pending"` // new credential whose purchase cost has not been entered
+	RetiredAt     *time.Time  `json:"retiredAt"`
+	AfterRetired  usageStats  `json:"afterRetired"` // usage after retirement, excluded from Total and profit
 	Batch         string      `json:"batch"`
 	BatchName     string      `json:"batchName"`
 	PeriodCost    []float64   `json:"periodCost"` // all-time priced cost per rate period, for live recalculation
@@ -79,6 +81,7 @@ type summaryView struct {
 	AccountCost    float64            `json:"accountCost"`
 	Multipliers    map[string]float64 `json:"multipliers"` // each channel's resale multiplier in effect now
 	Pending        int                `json:"pending"`     // credentials waiting for their purchase cost
+	Retired        int                `json:"retired"`
 	Profit         float64            `json:"profit"`
 	CostedAccounts int                `json:"costedAccounts"`
 	Accounts       int                `json:"accounts"`
@@ -201,6 +204,10 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 			view.Cost, view.CostSource = terms.Cost, terms.CostSource
 			view.PeriodCost = make([]float64, schedule.periods())
 			view.Pending = terms.Pending
+			if at, ok := settings.Accounts[id].retiredTime(); ok {
+				retired := at.In(location)
+				view.RetiredAt = &retired
+			}
 			accounts[id] = view
 			models[id] = make(map[string]*modelView)
 		}
@@ -213,7 +220,13 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 		regularInput := regularInputTokens(item.Provider, item.InputTokens, item.CacheReadTokens, item.CacheCreationTokens)
 		cost := calculateCost(price, item.Requests, regularInput, item.OutputTokens, item.CacheReadTokens, item.CacheCreationTokens)
 		multiplier := schedule.multiplier(view.Channel, item.Period)
-		view.Total.add(item, regularInput, cost, multiplier, priced)
+		// Requests after retirement still show as usage but no longer count towards the credential's profit.
+		afterRetired := view.RetiredAt != nil && !schedule.periodStart(item.Period).Before(*view.RetiredAt)
+		if afterRetired {
+			view.AfterRetired.add(item, regularInput, cost, multiplier, priced)
+		} else {
+			view.Total.add(item, regularInput, cost, multiplier, priced)
+		}
 		if index := schedule.channelIndex(view.Channel, item.Period); index >= 0 {
 			if channelCost[view.Channel] == nil {
 				size := len(schedule.channels[view.Channel].multipliers)
@@ -224,7 +237,7 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 				channelCost[view.Channel][index] += cost
 			}
 		}
-		if priced && item.Period < len(view.PeriodCost) {
+		if priced && !afterRetired && item.Period < len(view.PeriodCost) {
 			view.PeriodCost[item.Period] += cost
 		}
 		if !item.LastUsed.IsZero() && (view.LastUsed == nil || item.LastUsed.After(*view.LastUsed)) {
@@ -297,6 +310,9 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 		})
 		if view.Pending {
 			payload.Summary.Pending++
+		}
+		if view.RetiredAt != nil {
+			payload.Summary.Retired++
 		}
 		if view.Cost != nil {
 			profit := view.Total.Revenue - *view.Cost

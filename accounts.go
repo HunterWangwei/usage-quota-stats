@@ -40,9 +40,11 @@ type batchSettings struct {
 // accountOverride records a credential's purchase. An entry existing at all means the credential has been
 // entered (possibly without cost); credentials without an entry are new and wait for their cost.
 type accountOverride struct {
-	Batch            string   `json:"batch,omitempty"`
-	Cost             *float64 `json:"cost,omitempty"`
-	Note             string   `json:"note,omitempty"`
+	Batch string   `json:"batch,omitempty"`
+	Cost  *float64 `json:"cost,omitempty"`
+	Note  string   `json:"note,omitempty"`
+	// RetiredAt (RFC3339) freezes the credential's profit: requests after it no longer count as its revenue.
+	RetiredAt        string   `json:"retiredAt,omitempty"`
 	LegacyMultiplier *float64 `json:"multiplier,omitempty"` // v1.1.0/v1.2.0 only; ignored after migration
 }
 
@@ -164,7 +166,9 @@ func parseChannelRates(rates []rateChange, location *time.Location) ([]rateChang
 	return out, timeline, nil
 }
 
-func parseRates(all map[string][]rateChange, location *time.Location) (map[string][]rateChange, rateSchedule, error) {
+// parseRates builds the bucket schedule from every channel's change times plus the given extra boundaries
+// (credential retirement times), so each bucket lies entirely before or after any of them.
+func parseRates(all map[string][]rateChange, location *time.Location, extra []time.Time) (map[string][]rateChange, rateSchedule, error) {
 	out := make(map[string][]rateChange, len(all))
 	schedule := rateSchedule{channels: make(map[string]channelTimeline, len(all))}
 	seen := make(map[int64]bool)
@@ -184,6 +188,12 @@ func parseRates(all map[string][]rateChange, location *time.Location) (map[strin
 				seen[start.UnixNano()] = true
 				schedule.boundaries = append(schedule.boundaries, start)
 			}
+		}
+	}
+	for _, at := range extra {
+		if !seen[at.UnixNano()] {
+			seen[at.UnixNano()] = true
+			schedule.boundaries = append(schedule.boundaries, at)
 		}
 	}
 	sort.Slice(schedule.boundaries, func(i, j int) bool { return schedule.boundaries[i].Before(schedule.boundaries[j]) })
@@ -213,9 +223,9 @@ func loadAccountSettings(path string, location *time.Location) (accountSettings,
 	migrateLegacySettings(&settings)
 	migrateBatchMultipliers(&settings, location)
 	migrateGlobalRates(&settings)
-	rates, schedule, err := parseRates(settings.ChannelRates, location)
+	rates, schedule, err := parseRates(settings.ChannelRates, location, retirementTimes(settings.Accounts))
 	if err != nil {
-		rates, schedule, _ = parseRates(nil, location)
+		rates, schedule, _ = parseRates(nil, location, retirementTimes(settings.Accounts))
 	}
 	settings.ChannelRates = rates
 	return settings, schedule
@@ -355,6 +365,7 @@ func saveAccountSettingsLocked(settings accountSettings) error {
 	if err != nil {
 		return err
 	}
+	versionSettingsLocked("accounts")
 	if err := os.WriteFile(state.dataFile+".accounts.json", append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("save account settings: %w", err)
 	}
@@ -397,24 +408,31 @@ func updateAccountSettings(raw string) error {
 			override.Batch = ""
 		}
 		override.Note = strings.TrimSpace(override.Note)
+		if override.RetiredAt = strings.TrimSpace(override.RetiredAt); override.RetiredAt != "" {
+			at, errTime := time.Parse(time.RFC3339, override.RetiredAt)
+			if errTime != nil {
+				return fmt.Errorf("%s 的下架时间格式不正确", id)
+			}
+			override.RetiredAt = at.Format(time.RFC3339)
+		}
 		accounts[id] = override
 	}
 	state.Lock()
 	defer state.Unlock()
-	rates, schedule, err := parseRates(settings.ChannelRates, state.location)
+	// Keep credentials entered since the page was loaded (through the new-account prompt in another tab).
+	for id, override := range state.accounts.Accounts {
+		if _, ok := accounts[id]; !ok {
+			if _, exists := batches[override.Batch]; !exists {
+				override.Batch = ""
+			}
+			accounts[id] = override
+		}
+	}
+	rates, schedule, err := parseRates(settings.ChannelRates, state.location, retirementTimes(accounts))
 	if err != nil {
 		return err
 	}
 	settings = accountSettings{Batches: batches, Accounts: accounts, ChannelRates: rates}
-	// Keep credentials entered since the page was loaded (through the new-account prompt in another tab).
-	for id, override := range state.accounts.Accounts {
-		if _, ok := settings.Accounts[id]; !ok {
-			if _, exists := batches[override.Batch]; !exists {
-				override.Batch = ""
-			}
-			settings.Accounts[id] = override
-		}
-	}
 	return commitAccountSettingsLocked(settings, schedule)
 }
 
@@ -493,4 +511,23 @@ func enterNewAccounts(raw string, now time.Time) error {
 
 func formatAmount(value float64) string {
 	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.2f", value), "0"), ".")
+}
+
+// retirementTimes lists the retirement moments of all credentials.
+func retirementTimes(accounts map[string]accountOverride) []time.Time {
+	var times []time.Time
+	for _, override := range accounts {
+		if at, ok := override.retiredTime(); ok {
+			times = append(times, at)
+		}
+	}
+	return times
+}
+
+func (o accountOverride) retiredTime() (time.Time, bool) {
+	if o.RetiredAt == "" {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339, o.RetiredAt)
+	return at, err == nil
 }
