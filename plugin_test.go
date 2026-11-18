@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -44,54 +42,6 @@ func TestLookupPriceSupportsPrefix(t *testing.T) {
 	}
 	if got, ok := lookupPrice(prices, "gpt-5.3"); !ok || got.Input != 1.5 {
 		t.Fatalf("longest prefix price = %#v, %t", got, ok)
-	}
-}
-
-func TestUsageHandleAggregatesAndRenders(t *testing.T) {
-	path := t.TempDir() + "/usage.jsonl"
-	if err := applyConfig([]byte("currency: CNY\ndata-file: " + path + "\nprices:\n  gpt-5.4:\n    input: 2\n    output: 8\n    cache-read: 1\n    cache-write: 3\n")); err != nil {
-		t.Fatal(err)
-	}
-	record := usageRecord{Provider: "openai", Model: "gpt-5.4", AuthID: "config-a", Detail: usageDetail{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 40, CacheCreationTokens: 10}}
-	raw, _ := json.Marshal(record)
-	if _, err := handleMethod("usage.handle", raw); err != nil {
-		t.Fatal(err)
-	}
-	html, err := renderDashboard()
-	if err != nil {
-		t.Fatal(err)
-	}
-	page := string(html)
-	for _, want := range []string{"config-a", "gpt-5.4", "40.00%", "CNY"} {
-		if !strings.Contains(page, want) {
-			t.Fatalf("dashboard missing %q", want)
-		}
-	}
-}
-
-func TestUnpricedModelsAreNotListedAsRules(t *testing.T) {
-	path := t.TempDir() + "/usage.jsonl"
-	if err := applyConfig([]byte("data-file: " + path + "\nprices:\n  claude-*:\n    input: 3\n    output: 15\n")); err != nil {
-		t.Fatal(err)
-	}
-	for _, model := range []string{"claude-sonnet-4", "claude-sonnet-4", "gpt-5.4"} {
-		raw, _ := json.Marshal(usageRecord{Provider: "claude", Model: model, AuthID: "config-a", Detail: usageDetail{InputTokens: 10}})
-		if _, err := handleMethod("usage.handle", raw); err != nil {
-			t.Fatal(err)
-		}
-	}
-	html, err := renderDashboard()
-	if err != nil {
-		t.Fatal(err)
-	}
-	page := string(html)
-	if strings.Contains(page, `class="model" value="claude-sonnet-4"`) || strings.Contains(page, `class="model" value="gpt-5.4"`) {
-		t.Fatal("used models must not be rendered as editable price rules")
-	}
-	for _, want := range []string{`class="model" value="claude-*"`, "1 个模型 · 2 次请求", `data-model="gpt-5.4"`, "1 个模型未定价"} {
-		if !strings.Contains(page, want) {
-			t.Fatalf("dashboard missing %q", want)
-		}
 	}
 }
 

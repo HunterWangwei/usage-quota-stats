@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>配置额度统计</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7fb;--card:#fff;--text:#172033;--muted:#667085;--line:#e5e7eb;--accent:#2563eb;--input:#fff;--ok:#16a34a;--warn:#d97706;--bad:#dc2626;--soft:color-mix(in srgb,var(--accent) 8%,var(--card))}
+@media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--text:#f3f4f6;--muted:#9ca3af;--line:#374151;--accent:#60a5fa;--input:#111827}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.page{padding:24px;max-width:1600px;margin:auto}h1{margin:0;font-size:24px}h2{font-size:16px;margin:0}h3{font-size:14px;margin:0}
+.muted,.hint{color:var(--muted)}.hint{font-size:13px;margin:4px 0 14px}code{font-size:12px}
+.top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px}.top .updated{color:var(--muted);font-size:12px;margin-left:auto}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card)}.seg button{border:0;border-radius:0;height:32px;padding:0 12px;background:none}.seg button+button{border-left:1px solid var(--line)}.seg button.active{background:var(--accent);color:#fff}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:18px}.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;height:40px;padding:0 16px;font-weight:600;color:var(--muted)}.tabs button.active{color:var(--accent);border-bottom-color:var(--accent)}.tabs button:hover{background:none;color:var(--text)}
+.badge{display:inline-block;min-width:18px;padding:0 6px;margin-left:6px;border-radius:9px;background:var(--warn);color:#fff;font-size:11px;line-height:18px;text-align:center}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:16px}.card,.panel{background:var(--card);border:1px solid var(--line);border-radius:12px}.card{padding:14px 16px}.card .label{color:var(--muted);font-size:13px}.card .value{font-size:22px;font-weight:700;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card .sub{font-size:12px;color:var(--muted);margin-top:2px}.pos{color:var(--ok)}.neg{color:var(--bad)}.warn{color:var(--warn)}
+.panel{padding:16px;margin-bottom:16px}.panel-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}.panel-head .right{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input,select,textarea{border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text);font:inherit;outline:none}input,select{height:34px;padding:0 10px}input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+button{height:34px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font:inherit;cursor:pointer}button:hover{border-color:var(--accent);background:var(--soft)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,#000)}button.link{border:0;background:none;color:var(--accent);padding:0 4px;height:auto}
+table{border-collapse:collapse;width:100%}th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{color:var(--muted);font-weight:600;font-size:13px}th.l,td.l{text-align:left}.scroll{overflow:auto}.empty{text-align:center!important;color:var(--muted);padding:28px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}.chips button{height:30px;border-radius:15px;font-size:13px}.chips button.active{background:var(--accent);border-color:var(--accent);color:#fff}.chips button small{opacity:.75;margin-left:4px}
+.chart{position:relative;height:180px}.chart svg{width:100%;height:100%;display:block}.chart .bar{fill:var(--accent);opacity:.8}.chart .bar:hover{opacity:1}.chart .bar.today{fill:var(--ok)}.chart .axis{font-size:10px;fill:var(--muted)}.chart .grid{stroke:var(--line)}.chart .tip{position:absolute;pointer-events:none;background:var(--text);color:var(--bg);font-size:12px;padding:5px 8px;border-radius:6px;white-space:nowrap;transform:translate(-50%,-110%);display:none}
+.grid-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.acct{position:relative;text-align:left;height:auto;padding:0;border-radius:14px;overflow:hidden;display:flex;flex-direction:column;border:1px solid color-mix(in srgb,var(--accent) 14%,var(--line))}.acct:hover{transform:translateY(-2px);box-shadow:0 10px 24px #0f172a18;background:var(--card)}.acct{transition:transform .15s,box-shadow .15s}
+.acct-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--line);min-width:0}.acct-head strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.dot{width:9px;height:9px;border-radius:50%;flex:none;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 18%,transparent)}.dot.idle{background:#9ca3af;box-shadow:none}.dot.warn{background:var(--warn)}.dot.bad,.dot.off{background:var(--bad)}
+.tag{font-size:11px;padding:1px 7px;border-radius:9px;background:var(--soft);color:var(--accent);flex:none}
+.acct-stats{display:grid;grid-template-columns:repeat(3,1fr);padding:12px 16px;gap:8px}.acct-stats span{font-size:12px;color:var(--muted)}.acct-stats b{display:block;font-size:16px;color:var(--text);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acct-foot{margin-top:auto;padding:10px 16px 14px;border-top:1px dashed var(--line);font-size:12px;color:var(--muted)}.acct-foot .row{display:flex;justify-content:space-between;gap:8px}.progress{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:6px}.progress i{display:block;height:100%;background:var(--ok)}.progress i.low{background:var(--warn)}
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--card);color:var(--text);padding:0;width:min(1100px,96vw);max-height:90vh}dialog::backdrop{background:#0008}.dlg-head{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--line)}.dlg-head h2{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dlg-head .close{margin-left:auto;font-size:20px;border:0}.dlg-body{padding:16px 20px 20px;overflow:auto;max-height:calc(90vh - 64px)}
+.cost-table input{width:110px}.cost-table input.note{width:160px}.cost-table td{vertical-align:middle}.cost-table .who{max-width:280px;overflow:hidden;text-overflow:ellipsis}.inherit{font-size:11px;color:var(--muted);display:block}
+.savebar{display:flex;align-items:center;gap:10px;margin-top:14px}.status.ok{color:var(--ok)}.status.warn{color:var(--warn)}.status.error{color:var(--bad)}
+.fields{display:flex;gap:8px}.fields label{display:flex;flex-direction:column;gap:3px;color:var(--muted);font-size:12px}.fields input{width:96px}
+.price-row[data-mode=token] .f-request,.price-row[data-mode=token] .f-second,.price-row[data-mode=request] .f-token,.price-row[data-mode=request] .f-second,.price-row[data-mode=second] .f-token,.price-row[data-mode=second] .f-request{display:none}
+#prices td{text-align:left;vertical-align:middle}#prices .model{min-width:200px}.matches{white-space:normal;min-width:180px;max-width:320px}.match-list{display:flex;flex-wrap:wrap;gap:4px}.pill{padding:1px 6px;border-radius:6px;background:var(--soft);font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.unpriced-box{border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line));background:color-mix(in srgb,var(--warn) 7%,var(--card));border-radius:10px;padding:12px 14px;margin-bottom:16px}.unpriced-box h3{color:var(--warn);margin-bottom:8px}.unpriced-box td,.unpriced-box th{padding:6px 10px}
+#importDialog{width:min(640px,94vw);padding:20px}#importDialog textarea{width:100%;height:240px;padding:10px;font:13px/1.5 ui-monospace,Consolas,monospace;resize:vertical}.import-error{color:var(--bad);min-height:20px;margin:6px 0}.dialog-actions{display:flex;justify-content:flex-end;gap:8px}
+[hidden]{display:none!important}
+@media(max-width:900px){.page{padding:14px}#prices thead{display:none}#prices,#prices tbody,#prices tr,#prices td{display:block;width:100%}#prices .price-row{border:1px solid var(--line);border-radius:10px;padding:6px;margin-bottom:10px}#prices td{border:0;padding:6px}#prices .model{min-width:0;width:100%}.fields{flex-wrap:wrap}.fields label{flex:1 1 40%}.fields input{width:100%}.top .updated{margin-left:0}}
+</style></head>
+<body><main class="page">
+<div class="top"><h1>配置额度统计</h1><div class="seg" id="rangeSeg"><button data-range="today">今天</button><button data-range="7d">近 7 天</button><button data-range="30d">近 30 天</button><button data-range="month">本月</button><button data-range="all">全部</button></div><span class="updated" id="updated"></span></div>
+<nav class="tabs" id="tabs"><button data-tab="stats">用量统计</button><button data-tab="costs">账号成本与利润</button><button data-tab="prices">模型价格<span class="badge" id="unpricedBadge" hidden></span></button></nav>
+<section id="tab-stats">
+<div class="cards" id="summaryCards"></div>
+<div class="panel"><div class="panel-head"><h2>每日趋势</h2><span class="muted" id="chartNote"></span><div class="right"><div class="seg" id="metricSeg"><button data-metric="revenue">收入</button><button data-metric="cost">等值费用</button><button data-metric="requests">请求</button></div></div></div><div class="chart" id="chart"></div></div>
+<div class="panel"><div class="panel-head"><h2>凭证</h2><div class="chips" id="channelChips"></div><div class="right"><input id="search" placeholder="搜索邮箱或文件名" style="width:220px"><select id="sortBy"><option value="cost">按等值费用</option><option value="revenue">按收入</option><option value="profit">按累计利润</option><option value="requests">按请求数</option><option value="lastUsed">按最近使用</option><option value="failure">按失败率</option></select><button type="button" id="exportUsage">导出 CSV</button></div></div><div class="grid-cards" id="accountGrid"></div></div>
+</section>
+<section id="tab-costs" hidden>
+<div class="panel"><div class="panel-head"><h2>计算方式</h2></div><p class="hint" style="margin:0">收入 = 等值费用（按模型价格计算）× 售价倍率；利润 = 累计收入 − 账号成本；回本率 = 累计收入 ÷ 账号成本。成本和利润按账号的<b>全部历史</b>计算，不受顶部时间范围影响。账号留空时继承渠道默认值，渠道留空时成本视为未设置、倍率使用全局倍率。</p></div>
+<div class="panel"><div class="panel-head"><h2>默认值</h2></div><div class="scroll"><table class="cost-table"><thead><tr><th class="l">渠道</th><th class="l">默认账号成本 (<span class="cur"></span>)</th><th class="l">默认售价倍率</th><th>账号数</th></tr></thead><tbody id="channelDefaults"></tbody></table></div>
+<div class="savebar"><label>全局售价倍率 <input type="number" min="0" step="any" id="globalMultiplier" style="width:110px"></label><span class="muted">没有设置渠道或账号倍率时使用，1 表示按模型价格原价出售。</span></div></div>
+<div class="panel"><div class="panel-head"><h2>账号</h2><div class="chips" id="costChips"></div><div class="right"><label class="muted"><input type="checkbox" id="onlyUncosted" style="height:auto"> 只看未设成本</label><input id="costSearch" placeholder="搜索账号" style="width:200px"><button type="button" id="exportCosts">导出 CSV</button></div></div>
+<div class="scroll"><table class="cost-table"><thead><tr><th class="l">账号</th><th class="l">渠道</th><th class="l">账号成本</th><th class="l">售价倍率</th><th class="l">备注</th><th>累计等值费用</th><th>累计收入</th><th>利润</th><th class="l">回本</th></tr></thead><tbody id="costRows"></tbody><tfoot id="costFoot"></tfoot></table></div>
+<div class="savebar"><button type="button" class="primary" id="saveCosts">保存成本设置</button><span class="status" id="costStatus"></span></div></div>
+</section>
+<section id="tab-prices" hidden>
+<div class="panel"><div class="panel-head"><h2>模型价格</h2><div class="right"><button type="button" id="openImport">导入</button><button type="button" id="exportPrices">导出</button><button type="button" id="addPrice">+ 添加规则</button></div></div>
+<p class="hint">按 Token 计费的单位是 <span class="cur"></span> / 100 万 Token，按次计费按请求（图片）次数计。模型名以 * 结尾表示前缀规则（如 <code>claude-*</code>），精确模型名优先，其次匹配最长前缀；单独一个 <code>*</code> 可作为默认价格。待定价和命中统计基于全部历史。</p>
+<div id="unpricedBox"></div>
+<div class="scroll"><table id="prices"><thead><tr><th class="l">模型规则</th><th class="l">计费模式</th><th class="l">价格</th><th class="l">命中模型</th><th></th></tr></thead><tbody></tbody></table></div>
+<div class="savebar"><button type="button" class="primary" id="savePrices">保存价格</button><span class="status" id="priceStatus"></span></div><p class="hint">数据文件：<code id="dataFile"></code> · 时区：<span id="tz"></span></p></div>
+</section>
+<dialog id="accountDialog"><div class="dlg-head"><span class="dot" id="dlgDot"></span><h2 id="dlgTitle"></h2><span class="tag" id="dlgChannel"></span><button type="button" class="close" onclick="closeAccount()">×</button></div><div class="dlg-body" id="dlgBody"></div></dialog>
+<dialog id="importDialog"><h2>导入价格</h2><p class="hint">粘贴导出的 JSON，或 config.yaml 里的 <code>prices:</code> 配置段。同名规则会被覆盖，其余规则保留；导入后需点击“保存价格”才生效。</p><textarea spellcheck="false" placeholder="claude-*:&#10;  input: 3&#10;  output: 15&#10;  cache-read: 0.3&#10;  cache-write: 3.75"></textarea><div class="import-error"></div><div class="dialog-actions"><button type="button" onclick="this.closest('dialog').close()">取消</button><button type="button" class="primary" id="applyImport">合并到列表</button></div></dialog>
+</main>
+<script id="initialData" type="application/json">/*INITIAL_DATA*/null</script>
+<script>
+const CHANNELS={antigravity:'Antigravity',gemini:'Gemini CLI',codex:'Codex',xai:'xAI'};
+const store={get:(k,d)=>{try{return localStorage.getItem('usage-quota-'+k)??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem('usage-quota-'+k,v)}catch(e){}}};
+let data=JSON.parse(document.getElementById('initialData').textContent||'null');
+let view={range:store.get('range','all'),tab:store.get('tab','stats'),channel:store.get('channel','all'),sort:store.get('sort','cost'),metric:store.get('metric','revenue'),search:'',open:store.get('modal','')};
+let dirty={costs:false,prices:false};
+const $=s=>document.querySelector(s),$$=s=>Array.from(document.querySelectorAll(s));
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+const compact=new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1});
+function num(n){n=+n||0;return Math.abs(n)>=10000?compact.format(n):n.toLocaleString('zh-CN')}
+function money(n,sign){n=+n||0;let a=Math.abs(n),s=a>0&&a<0.01?a.toFixed(4):a.toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});return(n<0?'−':sign&&n>0?'+':'')+s}
+function cur(n,sign){return data.currency+' '+money(n,sign)}
+function pct(a,b){return b>0?(a*100/b).toFixed(1)+'%':'—'}
+function hitRate(s){return pct(s.cacheRead,s.input+s.cacheRead+s.cacheWrite)}
+function failRate(s){return pct(s.failures,s.requests+s.failures)}
+function ago(t){if(!t)return'从未使用';let m=(Date.now()-new Date(t))/60000;if(m<1)return'刚刚';if(m<60)return Math.floor(m)+' 分钟前';if(m<1440)return Math.floor(m/60)+' 小时前';return Math.floor(m/1440)+' 天前'}
+function displayName(a){if(a.email)return a.email;if(a.label)return a.label;let name=a.id.replace(/\.(json|ya?ml)$/i,'').replace(/^codex-[a-f0-9]+-/i,'').replace(/^xai-/i,'').replace(/-pro$/i,''),m=name.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,24}$/i);return m?m[0]:name}
+function channelName(c){return CHANNELS[c]||c}
+function status(a){let days=a.lastUsed?(Date.now()-new Date(a.lastUsed))/864e5:Infinity,s=a.range;
+if(a.disabled)return{cls:'off',text:'已禁用'};
+if(a.unavailable)return{cls:'bad',text:'不可用'+(a.statusMessage?'：'+a.statusMessage:'')};
+if(s.failures>=3&&s.failures/(s.requests+s.failures)>0.2)return{cls:'warn',text:'失败率高（'+failRate(s)+'）'};
+if(days>3)return{cls:'idle',text:a.lastUsed?Math.floor(days)+' 天未使用':'从未使用'};
+return{cls:'ok',text:'正常'}}
+function setStatus(id,text,cls){let el=$(id);el.textContent=text;el.className='status '+(cls||'')}
+async function api(params){let q=new URLSearchParams(params),r=await fetch(location.pathname+'?'+q,{cache:'no-store'}),text=await r.text(),body;try{body=JSON.parse(text)}catch(e){throw new Error('HTTP '+r.status)}if(!r.ok)throw new Error(body.error||'HTTP '+r.status);return body}
+let loading=false;
+async function reload(force){if(loading||(!force&&document.hidden))return;loading=true;try{let next=await api({api:'1',range:view.range});data=next;render()}catch(e){$('#updated').textContent='刷新失败：'+e.message}finally{loading=false}}
+function filteredAccounts(list,channel,search){let q=(search||'').toLowerCase();return list.filter(a=>(channel==='all'||a.channel===channel)&&(!q||displayName(a).toLowerCase().includes(q)||a.id.toLowerCase().includes(q)))}
+function renderChips(el,channel,onPick){let counts={};data.accounts.forEach(a=>counts[a.channel]=(counts[a.channel]||0)+1);let keys=Object.keys(CHANNELS).filter(k=>counts[k]).concat(Object.keys(counts).filter(k=>!CHANNELS[k]));
+el.innerHTML='<button data-c="all" class="'+(channel==='all'?'active':'')+'">全部<small>'+data.accounts.length+'</small></button>'+keys.map(k=>'<button data-c="'+esc(k)+'" class="'+(channel===k?'active':'')+'">'+esc(channelName(k))+'<small>'+counts[k]+'</small></button>').join('');
+el.querySelectorAll('button').forEach(b=>b.onclick=()=>onPick(b.dataset.c))}
+function render(){
+$$('.cur').forEach(e=>e.textContent=data.currency);
+$('#updated').textContent=data.range.label+(data.range.from?'（'+(data.range.from===data.range.to?data.range.to:data.range.from+' 至 '+data.range.to)+'）':'')+' · 更新于 '+new Date(data.generatedAt).toLocaleTimeString('zh-CN');
+$$('#rangeSeg button').forEach(b=>b.classList.toggle('active',b.dataset.range===view.range));
+$$('#tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===view.tab));
+['stats','costs','prices'].forEach(t=>$('#tab-'+t).hidden=t!==view.tab);
+let badge=$('#unpricedBadge');badge.hidden=!data.unpriced.length;badge.textContent=data.unpriced.length;
+let busy=id=>document.activeElement&&document.activeElement.closest(id)&&document.activeElement.matches("input,select,textarea");
+renderStats();if(!dirty.costs&&!busy("#tab-costs"))renderCosts();if(!dirty.prices&&!busy("#tab-prices"))renderPrices();
+if(view.open&&$('#accountDialog').open)renderAccount(view.open)}
+$$('#rangeSeg button').forEach(b=>b.onclick=()=>{view.range=b.dataset.range;store.set('range',view.range);reload(true)});
+$$('#tabs button').forEach(b=>b.onclick=()=>{view.tab=b.dataset.tab;store.set('tab',view.tab);render()});
+setInterval(()=>reload(false),5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)reload(false)});
+window.addEventListener('beforeunload',e=>{if(dirty.costs||dirty.prices){e.preventDefault();e.returnValue=''}});
+function csv(name,rows){let text='﻿'+rows.map(r=>r.map(v=>{v=String(v??'');return/[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}).join(',')).join('\r\n'),link=document.createElement('a');link.href=URL.createObjectURL(new Blob([text],{type:'text/csv;charset=utf-8'}));link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000)}
+function renderStats(){
+let s=data.summary,r=s.range,active=data.accounts.filter(a=>a.range.requests>0).length;
+let cards=[
+['等值费用',cur(r.cost),r.unpricedRequests?'<span class="warn">'+num(r.unpricedRequests)+' 次请求未定价，未计入</span>':'按模型价格计算'],
+['收入',cur(r.revenue),'等值费用 × 售价倍率'],
+['累计利润','<span class="'+(s.profit>=0?'pos':'neg')+'">'+cur(s.profit,true)+'</span>',s.costedAccounts?'已设成本 '+s.costedAccounts+' / '+s.accounts+' 个号，成本 '+cur(s.accountCost):'<button class="link" data-goto="costs">去设置账号成本 →</button>'],
+['请求数',num(r.requests),r.failures?'<span class="'+(r.failures/(r.requests+r.failures)>0.1?'warn':'')+'">失败 '+num(r.failures)+'（'+failRate(r)+'）</span>':'无失败请求'],
+['缓存命中率',hitRate(r),'缓存读 ÷（输入 + 缓存读 + 缓存写）'],
+['活跃账号',active+' / '+data.accounts.length,'所选时间范围内有成功请求']];
+$('#summaryCards').innerHTML=cards.map(c=>'<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div><div class="sub">'+c[2]+'</div></div>').join('');
+$$('[data-goto]').forEach(b=>b.onclick=()=>{view.tab=b.dataset.goto;store.set('tab',view.tab);render()});
+renderChart();
+renderChips($('#channelChips'),view.channel,c=>{view.channel=c;store.set('channel',c);renderStats()});
+$('#sortBy').value=view.sort;
+let list=filteredAccounts(data.accounts,view.channel,view.search),key={cost:a=>a.range.cost,revenue:a=>a.range.revenue,profit:a=>a.profit??-Infinity,requests:a=>a.range.requests,lastUsed:a=>a.lastUsed?+new Date(a.lastUsed):0,failure:a=>a.range.failures/Math.max(1,a.range.requests+a.range.failures)}[view.sort]||(a=>a.range.cost);
+list.sort((a,b)=>key(b)-key(a)||a.id.localeCompare(b.id));
+$('#accountGrid').innerHTML=list.length?list.map(accountCard).join(''):'<div class="empty">'+(data.accounts.length?'没有匹配的凭证':'暂无请求记录')+'</div>';
+$$('#accountGrid .acct').forEach(el=>el.onclick=()=>openAccount(el.dataset.id))}
+function accountCard(a){let st=status(a),r=a.range,foot;
+if(a.cost==null)foot='<div class="row"><span>累计收入 '+cur(a.total.revenue)+'</span><span>未设成本</span></div>';
+else{let p=a.payback==null?100:Math.min(100,a.payback*100);foot='<div class="row"><span>利润 <b class="'+(a.profit>=0?'pos':'neg')+'">'+cur(a.profit,true)+'</b></span><span>'+(a.payback==null?'零成本':'回本 '+(a.payback*100).toFixed(0)+'%')+'</span></div><div class="progress"><i class="'+(p<100?'low':'')+'" style="width:'+p+'%"></i></div>'}
+return'<button type="button" class="acct" data-id="'+esc(a.id)+'" title="'+esc(a.id)+'"><div class="acct-head"><span class="dot '+st.cls+'" title="'+esc(st.text)+'"></span><strong>'+esc(displayName(a))+'</strong><span class="tag">'+esc(channelName(a.channel))+'</span></div>'+
+'<div class="acct-stats"><span>等值费用<b>'+money(r.cost)+'</b></span><span>收入<b>'+money(r.revenue)+'</b></span><span>请求<b>'+num(r.requests)+(r.failures?' <small class="warn">失败 '+num(r.failures)+'</small>':'')+'</b></span><span>命中率<b>'+hitRate(r)+'</b></span><span>倍率<b>×'+(+a.multiplier).toFixed(2).replace(/\.?0+$/,'')+'</b></span><span>最近使用<b class="'+(st.cls==='idle'?'muted':'')+'">'+ago(a.lastUsed)+'</b></span></div>'+
+'<div class="acct-foot">'+foot+'</div></button>'}
+function renderChart(){let pts=data.daily,el=$('#chart'),m=view.metric;$$('#metricSeg button').forEach(b=>b.classList.toggle('active',b.dataset.metric===m));
+$('#chartNote').textContent=data.range.key==='today'?'显示近 7 天':data.range.key==='all'?'显示最近 '+pts.length+' 天':'';
+if(!pts.length){el.innerHTML='<div class="empty">暂无数据</div>';return}
+let val=p=>m==='requests'?p.requests:p[m],max=Math.max(...pts.map(val),0)||1,W=1000,H=180,top=10,bottom=22,left=46,ch=H-top-bottom,bw=(W-left)/pts.length,fmt=v=>m==='requests'?num(Math.round(v)):money(v);
+let grid=[0,.5,1].map(f=>{let y=top+ch*(1-f);return'<line class="grid" x1="'+left+'" x2="'+W+'" y1="'+y+'" y2="'+y+'"/><text class="axis" x="'+(left-6)+'" y="'+(y+3)+'" text-anchor="end">'+fmt(max*f)+'</text>'}).join('');
+let step=Math.ceil(pts.length/10),bars=pts.map((p,i)=>{let h=val(p)/max*ch,x=left+i*bw+bw*.15,label=i%step===0||i===pts.length-1?'<text class="axis" x="'+(x+bw*.35)+'" y="'+(H-6)+'" text-anchor="middle">'+p.day.slice(5)+'</text>':'';return'<rect class="bar'+(p.day===data.today?' today':'')+'" data-i="'+i+'" x="'+x+'" y="'+(top+ch-h)+'" width="'+Math.max(1,bw*.7)+'" height="'+Math.max(h,val(p)>0?1:0)+'"/>'+label}).join('');
+el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+bars+'</svg><div class="tip"></div>';
+let tip=el.querySelector('.tip');el.querySelectorAll('.bar').forEach(b=>{b.onmousemove=e=>{let p=pts[b.dataset.i],box=el.getBoundingClientRect();tip.style.display='block';tip.style.left=(e.clientX-box.left)+'px';tip.style.top=(e.clientY-box.top)+'px';tip.innerHTML=esc(p.day)+'<br>收入 '+esc(cur(p.revenue))+' · 等值 '+esc(cur(p.cost))+'<br>请求 '+num(p.requests)+(p.failures?' · 失败 '+num(p.failures):'')};b.onmouseleave=()=>tip.style.display='none'})}
+$$('#metricSeg button').forEach(b=>b.onclick=()=>{view.metric=b.dataset.metric;store.set('metric',view.metric);renderChart()});
+$('#search').oninput=e=>{view.search=e.target.value;renderStats()};
+$('#sortBy').onchange=e=>{view.sort=e.target.value;store.set('sort',view.sort);renderStats()};
+$('#exportUsage').onclick=()=>{let rows=[['凭证','账号','渠道','模型','请求','失败','普通输入','输出','缓存读','缓存写','缓存命中率','等值费用','收入','是否定价']];
+filteredAccounts(data.accounts,view.channel,view.search).forEach(a=>a.models.forEach(m=>rows.push([a.id,displayName(a),channelName(a.channel),m.model,m.requests,m.failures,m.input,m.output,m.cacheRead,m.cacheWrite,hitRate(m),m.cost.toFixed(6),m.revenue.toFixed(6),m.priced?'是':'否'])));
+csv('usage-'+data.range.key+'-'+data.today+'.csv',rows)};
+function openAccount(id){view.open=id;store.set('modal',id);renderAccount(id);let d=$('#accountDialog');if(!d.open)d.showModal()}
+function closeAccount(){view.open='';store.set('modal','');$('#accountDialog').close()}
+$('#accountDialog').addEventListener('close',()=>{view.open='';store.set('modal','')});
+$('#accountDialog').addEventListener('click',e=>{if(e.target.id==='accountDialog')closeAccount()});
+function renderAccount(id){let a=data.accounts.find(x=>x.id===id);if(!a){closeAccount();return}let st=status(a),r=a.range,t=a.total;
+$('#dlgDot').className='dot '+st.cls;$('#dlgTitle').textContent=displayName(a);$('#dlgChannel').textContent=channelName(a.channel);
+let costLine=a.cost==null?'未设成本':cur(a.cost)+(a.costSource==='channel'?'（渠道默认）':'');
+let cards=[['状态',esc(st.text),esc(a.id)],[data.range.label+'等值费用',cur(r.cost),'收入 '+cur(r.revenue)],[data.range.label+'请求',num(r.requests),'失败 '+num(r.failures)+' · 命中率 '+hitRate(r)],['累计收入',cur(t.revenue),'等值 '+cur(t.cost)+' × '+a.multiplier],['账号成本',costLine,(a.note?esc(a.note)+' · ':'')+'<button class="link" data-edit="1">编辑成本 →</button>'],['利润',a.profit==null?'—':'<span class="'+(a.profit>=0?'pos':'neg')+'">'+cur(a.profit,true)+'</span>',a.payback==null?(a.cost==null?'设置成本后显示':'零成本'):'回本 '+(a.payback*100).toFixed(1)+'%']];
+$('#dlgBody').innerHTML='<div class="cards">'+cards.map(c=>'<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div><div class="sub">'+c[2]+'</div></div>').join('')+'</div><h3 style="margin-bottom:8px">模型明细（'+esc(data.range.label)+'）</h3><div class="scroll"><table><thead><tr><th class="l">模型</th><th>请求</th><th>失败</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>等值费用</th><th>收入</th></tr></thead><tbody>'+
+(a.models.length?a.models.map(m=>'<tr><td class="l">'+esc(m.model)+'</td><td>'+num(m.requests)+'</td><td>'+num(m.failures)+'</td><td>'+num(m.input)+'</td><td>'+num(m.output)+'</td><td>'+num(m.cacheRead)+'</td><td>'+num(m.cacheWrite)+'</td><td>'+hitRate(m)+'</td><td'+(m.priced?'>'+money(m.cost):' class="warn">未定价')+'</td><td>'+(m.priced?money(m.revenue):'—')+'</td></tr>').join(''):'<tr><td colspan="10" class="empty">所选时间范围内没有请求</td></tr>')+'</tbody></table></div>';
+let edit=$('#dlgBody [data-edit]');if(edit)edit.onclick=()=>{closeAccount();view.tab='costs';store.set('tab','costs');render();let input=$('#costSearch');input.value=displayName(a);costFilter.search=input.value;renderCostRows();$('#costRows input[data-k="cost"]')?.focus()}}
+let draft=null,costFilter={channel:'all',search:'',only:false};
+function clone(v){return JSON.parse(JSON.stringify(v))}
+function effective(a){let acc=draft.accounts[a.id]||{},ch=draft.channels[a.channel]||{},cost=acc.cost??ch.cost??null,mult=acc.multiplier??ch.multiplier??draft.multiplier,revenue=a.total.cost*mult;return{cost,mult,revenue,profit:cost==null?null:revenue-cost,payback:cost>0?revenue/cost:null,inheritCost:ch.cost??null,inheritMult:ch.multiplier??draft.multiplier}}
+function markCostsDirty(){dirty.costs=true;setStatus('#costStatus','有未保存的修改','warn')}
+function setOverride(scope,key,field,raw){let map=draft[scope],o=map[key]||{};if(field==='note'){raw=raw.trim();if(raw)o.note=raw;else delete o.note}else if(raw===''){delete o[field]}else{o[field]=+raw}if(Object.keys(o).length)map[key]=o;else delete map[key];markCostsDirty()}
+function renderCosts(){draft=clone(data.settings);draft.channels=draft.channels||{};draft.accounts=draft.accounts||{};
+let counts={};data.accounts.forEach(a=>counts[a.channel]=(counts[a.channel]||0)+1);
+let channels=Object.keys(CHANNELS).filter(k=>counts[k]).concat(Object.keys(counts).filter(k=>!CHANNELS[k]));
+$('#channelDefaults').innerHTML=channels.length?channels.map(c=>{let o=draft.channels[c]||{};return'<tr><td class="l">'+esc(channelName(c))+'</td><td class="l"><input type="number" min="0" step="any" data-ch="'+esc(c)+'" data-k="cost" value="'+(o.cost??'')+'" placeholder="未设置"></td><td class="l"><input type="number" min="0" step="any" data-ch="'+esc(c)+'" data-k="multiplier" value="'+(o.multiplier??'')+'" placeholder="全局 ×'+draft.multiplier+'"></td><td>'+counts[c]+'</td></tr>'}).join(''):'<tr><td colspan="4" class="empty">暂无账号</td></tr>';
+$('#globalMultiplier').value=draft.multiplier;
+renderChips($('#costChips'),costFilter.channel,c=>{costFilter.channel=c;$$('#costChips button').forEach(b=>b.classList.toggle('active',b.dataset.c===c));renderCostRows()});
+renderCostRows()}
+function renderCostRows(){let list=filteredAccounts(data.accounts,costFilter.channel,costFilter.search);if(costFilter.only)list=list.filter(a=>effective(a).cost==null);
+list.sort((a,b)=>b.total.cost-a.total.cost||a.id.localeCompare(b.id));
+$('#costRows').innerHTML=list.length?list.map(a=>{let o=draft.accounts[a.id]||{};return'<tr data-id="'+esc(a.id)+'"><td class="l who" title="'+esc(a.id)+'">'+esc(displayName(a))+'<span class="inherit">'+esc(ago(a.lastUsed))+'</span></td><td class="l">'+esc(channelName(a.channel))+'</td><td class="l"><input type="number" min="0" step="any" data-k="cost" value="'+(o.cost??'')+'"></td><td class="l"><input type="number" min="0" step="any" data-k="multiplier" value="'+(o.multiplier??'')+'"></td><td class="l"><input class="note" data-k="note" value="'+esc(o.note||'')+'" placeholder="如购买渠道、日期"></td><td>'+money(a.total.cost)+'</td><td class="c-rev"></td><td class="c-profit"></td><td class="l c-pay" style="min-width:120px"></td></tr>'}).join(''):'<tr><td colspan="9" class="empty">没有匹配的账号</td></tr>';
+updateCostCells()}
+function updateCostCells(){let tot={cost:0,rev:0,profit:0,n:0};
+$$('#costRows tr[data-id]').forEach(row=>{let a=data.accounts.find(x=>x.id===row.dataset.id),e=effective(a);
+row.querySelector('[data-k=cost]').placeholder=e.inheritCost==null?'未设置':'继承 '+e.inheritCost;row.querySelector('[data-k=multiplier]').placeholder='继承 ×'+e.inheritMult;
+row.querySelector('.c-rev').textContent=money(e.revenue);
+row.querySelector('.c-profit').innerHTML=e.profit==null?'<span class="muted">—</span>':'<span class="'+(e.profit>=0?'pos':'neg')+'">'+money(e.profit,true)+'</span>';
+row.querySelector('.c-pay').innerHTML=e.cost==null?'<span class="muted">未设成本</span>':e.payback==null?'零成本':(e.payback*100).toFixed(0)+'%<div class="progress"><i class="'+(e.payback<1?'low':'')+'" style="width:'+Math.min(100,e.payback*100)+'%"></i></div>';
+tot.rev+=e.revenue;if(e.cost!=null){tot.cost+=e.cost;tot.profit+=e.profit;tot.n++}});
+$('#costFoot').innerHTML='<tr><th class="l" colspan="5">合计（当前列表，已设成本 '+tot.n+' 个，成本 '+esc(cur(tot.cost))+'）</th><th></th><th>'+money(tot.rev)+'</th><th class="'+(tot.profit>=0?'pos':'neg')+'">'+money(tot.profit,true)+'</th><th></th></tr>'}
+$('#costRows').addEventListener('input',e=>{let k=e.target.dataset.k,row=e.target.closest('tr');if(!k||!row)return;setOverride('accounts',row.dataset.id,k,e.target.value);updateCostCells()});
+$('#channelDefaults').addEventListener('input',e=>{let k=e.target.dataset.k;if(!k)return;setOverride('channels',e.target.dataset.ch,k,e.target.value);updateCostCells()});
+$('#globalMultiplier').oninput=e=>{draft.multiplier=e.target.value===''?1:+e.target.value;markCostsDirty();$$('#channelDefaults [data-k=multiplier]').forEach(i=>i.placeholder='全局 ×'+draft.multiplier);updateCostCells()};
+$('#costSearch').oninput=e=>{costFilter.search=e.target.value;renderCostRows()};
+$('#onlyUncosted').onchange=e=>{costFilter.only=e.target.checked;renderCostRows()};
+$('#saveCosts').onclick=async()=>{let bad=[draft.multiplier,...Object.values(draft.channels).flatMap(o=>[o.cost,o.multiplier]),...Object.values(draft.accounts).flatMap(o=>[o.cost,o.multiplier])].some(v=>v!=null&&(!isFinite(v)||v<0));if(bad){setStatus('#costStatus','成本和倍率必须是非负数','error');return}
+setStatus('#costStatus','保存中…');try{await api({accounts:JSON.stringify(draft)});dirty.costs=false;setStatus('#costStatus','已保存','ok');await reload(true)}catch(e){setStatus('#costStatus','保存失败：'+e.message,'error')}};
+$('#exportCosts').onclick=()=>{let rows=[['凭证','账号','渠道','账号成本','售价倍率','备注','累计等值费用','累计收入','利润','回本率','最近使用']];
+data.accounts.forEach(a=>{let e=effective(a),o=draft.accounts[a.id]||{};rows.push([a.id,displayName(a),channelName(a.channel),e.cost??'',e.mult,o.note||'',a.total.cost.toFixed(6),e.revenue.toFixed(6),e.profit==null?'':e.profit.toFixed(6),e.payback==null?'':(e.payback*100).toFixed(1)+'%',a.lastUsed||''])});csv('account-profit-'+data.today+'.csv',rows)};
+const PRICE_FIELDS=[['token','input','输入'],['token','output','输出'],['token','cache_read','缓存读'],['token','cache_write','缓存写'],['request','request','每次 / 张'],['second','second','每秒']];
+function priceRowHTML(model,p,matches){p=p||{};let mode=p.mode||'token',m=matches;
+let matchHTML=m==null?'<span class="muted">保存后显示</span>':m.length?'<div class="inherit" title="'+esc(m.map(x=>x.model+'：'+x.requests+' 次').join('\n'))+'">'+m.length+' 个模型 · '+num(m.reduce((n,x)=>n+x.requests,0))+' 次请求</div><div class="match-list">'+m.slice(0,4).map(x=>'<span class="pill">'+esc(x.model)+'</span>').join('')+(m.length>4?'<span class="muted">+'+(m.length-4)+'</span>':'')+'</div>':'<span class="muted">暂无用量</span>';
+return'<tr class="price-row" data-mode="'+mode+'"><td><input class="model" value="'+esc(model)+'" placeholder="模型名或前缀，如 claude-*"></td><td><select class="mode"><option value="token"'+(mode==='token'?' selected':'')+'>按 Token</option><option value="request"'+(mode==='request'?' selected':'')+'>按次 / 张</option><option value="second"'+(mode==='second'?' selected':'')+'>按秒（暂不计费）</option></select></td><td><div class="fields">'+PRICE_FIELDS.map(f=>'<label class="f-'+f[0]+'">'+f[2]+'<input type="number" min="0" step="any" data-field="'+f[1]+'" value="'+(+p[f[1]]||0)+'"></label>').join('')+'</div></td><td class="matches">'+matchHTML+'</td><td><button type="button" class="del">删除</button></td></tr>'}
+function renderPrices(){$('#dataFile').textContent=data.dataFile;$('#tz').textContent=data.timezone;
+$('#unpricedBox').innerHTML=data.unpriced.length?'<div class="unpriced-box"><h3>待定价：'+data.unpriced.length+' 个模型有用量但没有命中任何规则，费用未计入合计</h3><div class="scroll"><table><thead><tr><th class="l">模型</th><th>请求</th><th>Token</th><th></th></tr></thead><tbody>'+data.unpriced.map(u=>'<tr><td class="l"><span class="pill">'+esc(u.model)+'</span></td><td>'+num(u.requests)+'</td><td>'+num(u.tokens)+'</td><td><button type="button" class="add-rule" data-model="'+esc(u.model)+'">设置价格</button></td></tr>').join('')+'</tbody></table></div></div>':'';
+$('#prices tbody').innerHTML=data.prices.length?data.prices.map(p=>priceRowHTML(p.model,p,p.matches)).join(''):emptyPriceRow()}
+function emptyPriceRow(){return'<tr class="empty-row"><td colspan="5" class="empty">还没有价格规则。点击“添加规则”，或用“导入”粘贴已有配置。</td></tr>'}
+function markPricesDirty(){dirty.prices=true;setStatus('#priceStatus','有未保存的修改','warn')}
+function fillPriceRow(row,p){let mode=row.querySelector('.mode');mode.value=p.mode||'token';row.dataset.mode=mode.value;row.querySelectorAll('[data-field]').forEach(i=>i.value=p[i.dataset.field]??0)}
+function newPriceRow(model,p){$('#prices .empty-row')?.remove();$('#prices tbody').insertAdjacentHTML('beforeend',priceRowHTML(model||'',p,null));return $('#prices tbody').lastElementChild}
+function addPrice(model){let row=newPriceRow(model),input=row.querySelector(model?'[data-field=input]':'.model');markPricesDirty();row.scrollIntoView({block:'nearest'});input.focus();input.select()}
+function collectPrices(){let prices={},error='';$$('#prices .price-row').forEach(row=>{let model=row.querySelector('.model').value.trim();if(!model||error)return;if(prices[model]){error='规则重复：'+model;return}let p={mode:row.querySelector('.mode').value};row.querySelectorAll('[data-field]').forEach(i=>{let v=+i.value||0;if(v<0)error=model+' 的价格不能为负数';p[i.dataset.field]=v});prices[model]=p});return{prices,error}}
+$('#addPrice').onclick=()=>addPrice();
+$('#savePrices').onclick=async()=>{let{prices,error}=collectPrices();if(error){setStatus('#priceStatus',error,'error');return}setStatus('#priceStatus','保存中…');try{await api({prices:JSON.stringify(prices)});dirty.prices=false;setStatus('#priceStatus','已保存 '+Object.keys(prices).length+' 条规则','ok');await reload(true)}catch(e){setStatus('#priceStatus','保存失败：'+e.message,'error')}};
+$('#exportPrices').onclick=()=>{let{prices,error}=collectPrices();if(error){setStatus('#priceStatus',error,'error');return}let text=JSON.stringify(prices,null,2)+'\n',link=document.createElement('a');link.href=URL.createObjectURL(new Blob([text],{type:'application/json'}));link.download='usage-quota-prices.json';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);navigator.clipboard?.writeText(text).then(()=>setStatus('#priceStatus','已导出，并复制到剪贴板','ok'),()=>{})};
+$('#openImport').onclick=()=>{let d=$('#importDialog');d.querySelector('textarea').value='';d.querySelector('.import-error').textContent='';d.showModal();d.querySelector('textarea').focus()};
+$('#applyImport').onclick=async()=>{let d=$('#importDialog'),text=d.querySelector('textarea').value.trim();if(!text)return;try{let body=await api({prices_parse:text}),count=0;Object.entries(body.prices||{}).forEach(([model,p])=>{let row=$$('#prices .price-row').find(r=>r.querySelector('.model').value.trim()===model);if(row)fillPriceRow(row,p);else newPriceRow(model,p);count++});d.close();markPricesDirty();setStatus('#priceStatus','已导入 '+count+' 条规则，点击“保存价格”后生效','warn')}catch(e){d.querySelector('.import-error').textContent='导入失败：'+e.message}};
+$('#tab-prices').addEventListener('input',e=>{if(e.target.closest('#prices'))markPricesDirty()});
+$('#tab-prices').addEventListener('change',e=>{if(e.target.matches('#prices .mode')){e.target.closest('tr').dataset.mode=e.target.value;markPricesDirty()}});
+$('#tab-prices').addEventListener('click',e=>{let b=e.target.closest('button');if(!b)return;if(b.matches('#prices .del')){b.closest('tr').remove();if(!$('#prices .price-row'))$('#prices tbody').innerHTML=emptyPriceRow();markPricesDirty()}else if(b.matches('.add-rule')){let row=b.closest('tr'),body=row.parentElement;addPrice(b.dataset.model);row.remove();if(!body.rows.length)$('#unpricedBox').innerHTML=''}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#accountDialog').open)closeAccount()});
+if(data){if(data.range.key!==view.range)reload(true);else render();if(view.open&&data.accounts.some(a=>a.id===view.open))openAccount(view.open)}else reload(true);
+</script></body></html>
