@@ -417,42 +417,27 @@ func updateAccountSettings(raw string) error {
 		}
 		accounts[id] = override
 	}
-	state.Lock()
-	defer state.Unlock()
-	// Keep credentials entered since the page was loaded (through the new-account prompt in another tab).
-	for id, override := range state.accounts.Accounts {
-		if _, ok := accounts[id]; !ok {
-			if _, exists := batches[override.Batch]; !exists {
-				override.Batch = ""
+	requested := settings.ChannelRates
+	return applySettingsChange(func() (accountSettings, rateSchedule, error) {
+		merged := make(map[string]accountOverride, len(accounts))
+		for id, override := range accounts {
+			merged[id] = override
+		}
+		// Keep credentials entered since the page was loaded (through the new-account prompt in another tab).
+		for id, override := range state.accounts.Accounts {
+			if _, ok := merged[id]; !ok {
+				if _, exists := batches[override.Batch]; !exists {
+					override.Batch = ""
+				}
+				merged[id] = override
 			}
-			accounts[id] = override
 		}
-	}
-	rates, schedule, err := parseRates(settings.ChannelRates, state.location, retirementTimes(accounts))
-	if err != nil {
-		return err
-	}
-	settings = accountSettings{Batches: batches, Accounts: accounts, ChannelRates: rates}
-	return commitAccountSettingsLocked(settings, schedule)
-}
-
-// commitAccountSettingsLocked saves settings and, when the multiplier change times moved, rebuilds the usage
-// buckets from the raw records. The caller must hold state's write lock.
-func commitAccountSettingsLocked(settings accountSettings, schedule rateSchedule) error {
-	rows := state.rows
-	if schedule.key() != state.schedule.key() && state.dataFile != "" {
-		var err error
-		if rows, err = loadUsage(state.dataFile, state.location, schedule); err != nil {
-			return err
+		rates, schedule, err := parseRates(requested, state.location, retirementTimes(merged))
+		if err != nil {
+			return accountSettings{}, rateSchedule{}, err
 		}
-	}
-	if err := saveAccountSettingsLocked(settings); err != nil {
-		return err
-	}
-	state.rows = rows
-	state.schedule = schedule
-	state.accounts = settings
-	return nil
+		return accountSettings{Batches: batches, Accounts: merged, ChannelRates: rates}, schedule, nil
+	})
 }
 
 // newAccountEntry is one credential submitted from the new-account prompt.
@@ -506,7 +491,7 @@ func enterNewAccounts(raw string, now time.Time) error {
 		accounts[entry.ID] = override
 	}
 	settings.Batches, settings.Accounts = batches, accounts
-	return commitAccountSettingsLocked(settings, state.schedule)
+	return commitSettingsLocked(settings, state.schedule, state.rows)
 }
 
 func formatAmount(value float64) string {
@@ -545,20 +530,20 @@ func setRetirement(id, at string) error {
 		}
 		at = parsed.Format(time.RFC3339)
 	}
-	state.Lock()
-	defer state.Unlock()
-	settings := state.accounts
-	accounts := make(map[string]accountOverride, len(settings.Accounts)+1)
-	for key, override := range settings.Accounts {
-		accounts[key] = override
-	}
-	override := accounts[id]
-	override.RetiredAt = at
-	accounts[id] = override
-	rates, schedule, err := parseRates(settings.ChannelRates, state.location, retirementTimes(accounts))
-	if err != nil {
-		return err
-	}
-	settings.Accounts, settings.ChannelRates = accounts, rates
-	return commitAccountSettingsLocked(settings, schedule)
+	return applySettingsChange(func() (accountSettings, rateSchedule, error) {
+		settings := state.accounts
+		accounts := make(map[string]accountOverride, len(settings.Accounts)+1)
+		for key, override := range settings.Accounts {
+			accounts[key] = override
+		}
+		override := accounts[id]
+		override.RetiredAt = at
+		accounts[id] = override
+		rates, schedule, err := parseRates(settings.ChannelRates, state.location, retirementTimes(accounts))
+		if err != nil {
+			return accountSettings{}, rateSchedule{}, err
+		}
+		settings.Accounts, settings.ChannelRates = accounts, rates
+		return settings, schedule, nil
+	})
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -79,7 +80,7 @@ func TestUnusedListedCredentialsAppear(t *testing.T) {
 	entry := authFileEntry{ID: "xai-new.json", Name: "xai-new.json", Provider: "xai", Email: "new@example.com", Disabled: true}
 	authInfo.entries, authInfo.byKey = []authFileEntry{entry}, map[string]authFileEntry{"xai-new.json": entry}
 	authInfo.Unlock()
-	payload := buildDashboard("today", now)
+	payload := buildDashboard("today", now, true)
 	a := findAccount(t, payload, "xai-new.json")
 	if a.Models == nil {
 		t.Fatal("models must be an empty list, not null")
@@ -305,5 +306,35 @@ func TestV110SettingsMigrate(t *testing.T) {
 	}
 	if _, ok := payload.Settings.Batches["migrated-codex"]; !ok {
 		t.Fatal("channel default cost should become a purchase record")
+	}
+}
+
+func TestRefreshSkipsUnchangedAndModelsOnDemand(t *testing.T) {
+	setupDashboard(t, "prices:\n  '*':\n    input: 1\n", use("codex", "a.json", time.Now()))
+	first := buildDashboard("all", time.Now())
+	if first.Accounts[0].Models != nil {
+		t.Fatal("refresh payload should not carry per-model details")
+	}
+	query := func(q string) string {
+		raw, err := handleMethod("management.handle", []byte(`{"Query":`+q+`}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var env struct {
+			Result struct{ Body []byte }
+		}
+		_ = json.Unmarshal(raw, &env)
+		return string(env.Result.Body)
+	}
+	since := fmt.Sprint(first.Version)
+	if body := query(`{"api":["1"],"since":["` + since + `"]}`); body != `{"unchanged":true}` {
+		t.Fatalf("unchanged refresh = %s", body)
+	}
+	recordAll(t, use("codex", "a.json", time.Now()))
+	if body := query(`{"api":["1"],"since":["` + since + `"]}`); strings.Contains(body, "unchanged") {
+		t.Fatal("refresh after new usage must return data")
+	}
+	if body := query(`{"models":["1"],"account":["a.json"]}`); !strings.Contains(body, `"a.json":[{"model":"m"`) {
+		t.Fatalf("models = %s", body)
 	}
 }

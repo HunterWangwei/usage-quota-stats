@@ -106,8 +106,9 @@ if(days>3)return{cls:'idle',text:a.lastUsed?Math.floor(days)+' 天未使用':'�
 return{cls:'ok',text:'正常'}}
 function setStatus(id,text,cls){let el=$(id);el.textContent=text;el.className='status '+(cls||'')}
 async function api(params){let q=new URLSearchParams(params),r=await fetch(location.pathname+'?'+q,{cache:'no-store'}),text=await r.text(),body;try{body=JSON.parse(text)}catch(e){throw new Error('HTTP '+r.status)}if(!r.ok)throw new Error(body.error||'HTTP '+r.status);return body}
-let loading=false;
-async function reload(force){if(loading||(!force&&document.hidden))return;loading=true;try{let next=await api({api:'1',range:view.range});data=next;render()}catch(e){$('#updated').textContent='刷新失败：'+e.message}finally{loading=false}}
+let loading=false,accountById=new Map(),modelCache={};
+function setData(next){data=next;accountById=new Map(data.accounts.map(a=>[a.id,a]));modelCache={}}
+async function reload(force){if(loading||(!force&&document.hidden))return;loading=true;try{let params={api:'1',range:view.range};if(!force&&data&&data.range.key===view.range)params.since=data.version;let next=await api(params);if(next.unchanged){$('#updated').textContent=$('#updated').textContent.replace(/更新于 .*/,'更新于 '+new Date().toLocaleTimeString('zh-CN'));return}setData(next);render()}catch(e){$('#updated').textContent='刷新失败：'+e.message}finally{loading=false}}
 function filteredAccounts(list,channel,search){let q=(search||'').toLowerCase();return list.filter(a=>(channel==='all'||a.channel===channel)&&(!q||displayName(a).toLowerCase().includes(q)||a.id.toLowerCase().includes(q)))}
 function renderChips(el,channel,onPick){let counts={};data.accounts.forEach(a=>counts[a.channel]=(counts[a.channel]||0)+1);let keys=Object.keys(CHANNELS).filter(k=>counts[k]).concat(Object.keys(counts).filter(k=>!CHANNELS[k]));
 el.innerHTML='<button data-c="all" class="'+(channel==='all'?'active':'')+'">全部<small>'+data.accounts.length+'</small></button>'+keys.map(k=>'<button data-c="'+esc(k)+'" class="'+(channel===k?'active':'')+'">'+esc(channelName(k))+'<small>'+counts[k]+'</small></button>').join('');
@@ -120,7 +121,7 @@ $$('#tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===view.t
 ['stats','costs','prices','backup'].forEach(t=>$('#tab-'+t).hidden=t!==view.tab);
 let badge=$('#unpricedBadge');badge.hidden=!data.unpriced.length;badge.textContent=data.unpriced.length;
 let busy=id=>document.activeElement&&document.activeElement.closest(id)&&document.activeElement.matches("input,select,textarea");
-renderStats();if(!dirty.costs&&!busy("#tab-costs"))renderCosts();checkPending();if(!dirty.prices&&!busy("#tab-prices"))renderPrices();
+if(view.tab==='stats')renderStats();else if(view.tab==='costs'){if(!draft||!dirty.costs&&!busy("#tab-costs"))renderCosts()}else if(view.tab==='prices'){if(!dirty.prices&&!busy("#tab-prices"))renderPrices()}checkPending();
 if(view.open&&$('#accountDialog').open)renderAccount(view.open)}
 $$('#rangeSeg button').forEach(b=>b.onclick=()=>{view.range=b.dataset.range;store.set('range',view.range);reload(true)});
 $$('#tabs button').forEach(b=>b.onclick=()=>{view.tab=b.dataset.tab;store.set('tab',view.tab);render();if(view.tab==='backup')loadBackups()});
@@ -165,8 +166,8 @@ $$('#metricSeg button').forEach(b=>b.onclick=()=>{view.metric=b.dataset.metric;s
 $('#search').oninput=e=>{view.search=e.target.value;renderStats()};
 $('#hideRetired').checked=view.hideRetired;$('#hideRetired').onchange=e=>{view.hideRetired=e.target.checked;store.set('hideRetired',e.target.checked?'1':'');renderStats()};
 $('#sortBy').onchange=e=>{view.sort=e.target.value;store.set('sort',view.sort);renderStats()};
-$('#exportUsage').onclick=()=>{let rows=[['凭证','账号','渠道','模型','请求','失败','普通输入','输出','缓存读','缓存写','缓存命中率','等值费用','收入','是否定价']];
-filteredAccounts(data.accounts,view.channel,view.search).forEach(a=>a.models.forEach(m=>rows.push([a.id,displayName(a),channelName(a.channel),m.model,m.requests,m.failures,m.input,m.output,m.cacheRead,m.cacheWrite,hitRate(m),m.cost.toFixed(6),m.revenue.toFixed(6),m.priced?'是':'否'])));
+$('#exportUsage').onclick=async()=>{let all;try{all=await loadModels('')}catch(e){alert('导出失败：'+e.message);return}let rows=[['凭证','账号','渠道','模型','请求','失败','普通输入','输出','缓存读','缓存写','缓存命中率','等值费用','收入','是否定价']];
+filteredAccounts(data.accounts,view.channel,view.search).forEach(a=>(all[a.id]||[]).forEach(m=>rows.push([a.id,displayName(a),channelName(a.channel),m.model,m.requests,m.failures,m.input,m.output,m.cacheRead,m.cacheWrite,hitRate(m),m.cost.toFixed(6),m.revenue.toFixed(6),m.priced?'是':'否'])));
 csv('usage-'+data.range.key+'-'+data.today+'.csv',rows)};
 function retireBox(a){if(a.retiredAt)return'<div class="retire-box retired"><span>已于 <b>'+esc(fmtTime(a.retiredAt))+'</b> 下架，利润定格在这一刻。'+(a.afterRetired.requests?'<span class="warn">下架后仍有 '+num(a.afterRetired.requests)+' 次请求，请检查这个号是否还在被调度。</span>':'')+'</span><button type="button" id="unretireBtn">恢复使用</button><span class="status" id="retireStatus"></span></div>';
 return'<div class="retire-box"><span>账号不再使用（被封、到期、转出）时可以下架：利润定格在下架时刻，之后的请求不再计入收入。</span><label>下架时间 <input type="datetime-local" id="retireAt"></label><button type="button" class="primary" id="retireBtn">下架此账号</button><span class="status" id="retireStatus"></span></div>'}
@@ -175,12 +176,13 @@ function openAccount(id){view.open=id;store.set('modal',id);renderAccount(id);le
 function closeAccount(){view.open='';store.set('modal','');$('#accountDialog').close()}
 $('#accountDialog').addEventListener('close',()=>{view.open='';store.set('modal','')});
 $('#accountDialog').addEventListener('click',e=>{if(e.target.id==='accountDialog')closeAccount()});
-function renderAccount(id){let a=data.accounts.find(x=>x.id===id);if(!a){closeAccount();return}let st=status(a),r=a.range,t=a.total;
+async function loadModels(id){let key=view.range+'|'+(id||'*');if(modelCache[key])return modelCache[key];let body=await api({models:'1',range:view.range,...(id?{account:id}:{})});return modelCache[key]=body.models||{}}
+function renderAccount(id){let a=accountById.get(id);if(!a){closeAccount();return}let cached=modelCache[view.range+'|'+id]||modelCache[view.range+'|*'];a={...a,models:cached?cached[id]||[]:null};if(!cached)loadModels(id).then(()=>{if(view.open===id&&$('#accountDialog').open)renderAccount(id)}).catch(()=>{});let st=status(a),r=a.range,t=a.total;
 $('#dlgDot').className='dot '+st.cls;$('#dlgTitle').textContent=displayName(a);$('#dlgChannel').textContent=channelName(a.channel);
 let costLine=a.cost==null?'未设成本':cur(a.cost)+(a.costSource==='batch'?'（'+esc(a.batchName)+'）':a.costSource==='account'?'（单独设置）':'');
 let cards=[['状态',esc(st.text),esc(a.id)],[data.range.label+'等值费用',cur(r.cost),'收入 '+cur(r.revenue)],[data.range.label+'请求',num(r.requests),'失败 '+num(r.failures)+' · 命中率 '+hitRate(r)],['累计收入',cur(t.revenue),'等值 '+cur(t.cost)+' × 请求时倍率'+(a.batchName?' · '+esc(a.batchName):' · 未分批')],['账号成本',costLine,(a.note?esc(a.note)+' · ':'')+'<button class="link" data-edit="1">编辑成本 →</button>'],['利润',a.profit==null?'—':'<span class="'+(a.profit>=0?'pos':'neg')+'">'+cur(a.profit,true)+'</span>',a.payback==null?(a.cost==null?'设置成本后显示':'零成本'):'回本 '+(a.payback*100).toFixed(1)+'%']];
 $('#dlgBody').innerHTML=retireBox(a)+'<div class="cards">'+cards.map(c=>'<div class="card"><div class="label">'+c[0]+'</div><div class="value">'+c[1]+'</div><div class="sub">'+c[2]+'</div></div>').join('')+'</div><h3 style="margin-bottom:8px">模型明细（'+esc(data.range.label)+'）</h3><div class="scroll"><table><thead><tr><th class="l">模型</th><th>请求</th><th>失败</th><th>普通输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>命中率</th><th>等值费用</th><th>收入</th></tr></thead><tbody>'+
-(a.models.length?a.models.map(m=>'<tr><td class="l">'+esc(m.model)+'</td><td>'+num(m.requests)+'</td><td>'+num(m.failures)+'</td><td>'+num(m.input)+'</td><td>'+num(m.output)+'</td><td>'+num(m.cacheRead)+'</td><td>'+num(m.cacheWrite)+'</td><td>'+hitRate(m)+'</td><td'+(m.priced?'>'+money(m.cost):' class="warn">未定价')+'</td><td>'+(m.priced?money(m.revenue):'—')+'</td></tr>').join(''):'<tr><td colspan="10" class="empty">所选时间范围内没有请求</td></tr>')+'</tbody></table></div>';
+(a.models==null?'<tr><td colspan="10" class="empty">加载中…</td></tr>':a.models.length?a.models.map(m=>'<tr><td class="l">'+esc(m.model)+'</td><td>'+num(m.requests)+'</td><td>'+num(m.failures)+'</td><td>'+num(m.input)+'</td><td>'+num(m.output)+'</td><td>'+num(m.cacheRead)+'</td><td>'+num(m.cacheWrite)+'</td><td>'+hitRate(m)+'</td><td'+(m.priced?'>'+money(m.cost):' class="warn">未定价')+'</td><td>'+(m.priced?money(m.revenue):'—')+'</td></tr>').join(''):'<tr><td colspan="10" class="empty">所选时间范围内没有请求</td></tr>')+'</tbody></table></div>';
 let ra=$('#retireAt');if(ra){let d=new Date();d.setSeconds(0,0);ra.value=localInput(d.toISOString());$('#retireBtn').onclick=()=>{let t=new Date(ra.value);if(isNaN(t)){setStatus('#retireStatus','请填写下架时间','error');return}applyRetire(a.id,t.toISOString())}}
 let ur=$('#unretireBtn');if(ur)ur.onclick=()=>applyRetire(a.id,'');
 let edit=$('#dlgBody [data-edit]');if(edit)edit.onclick=()=>{closeAccount();view.tab='costs';store.set('tab','costs');render();let input=$('#costSearch');input.value=displayName(a);costFilter.search=input.value;renderCostRows();$('#costRows input[data-k="cost"]')?.focus()}}
@@ -189,12 +191,15 @@ function clone(v){return JSON.parse(JSON.stringify(v))}
 function channelsInUse(){let counts={};data.accounts.forEach(a=>counts[a.channel]=(counts[a.channel]||0)+1);return{counts,list:Object.keys(CHANNELS).filter(k=>counts[k]).concat(Object.keys(counts).filter(k=>!CHANNELS[k]))}}
 function batchList(){return Object.entries(draft.batches).map(([id,b])=>({id,...b})).sort((a,b)=>(a.date||'').localeCompare(b.date||'')||a.id.localeCompare(b.id))}
 function rateOrder(x,y){return!x.from?-1:!y.from?1:new Date(x.from)-new Date(y.from)}
-function timeline(c){return(draft.channelRates[c]||[]).map((r,i)=>({r,i})).sort((x,y)=>rateOrder(x.r,y.r))}
-function multAt(c,iso){let t=iso?new Date(iso).getTime():-Infinity,m=1;for(const{r}of timeline(c)){if(!r.from||new Date(r.from).getTime()<=t)m=r.multiplier}return m}
+let passCache=null;
+function beginPass(){passCache={eff:new Map(),timeline:new Map()}}
+function timeline(c){if(passCache?.timeline.has(c))return passCache.timeline.get(c);let t=(draft.channelRates[c]||[]).map((r,i)=>({r,i,at:r.from?new Date(r.from).getTime():-Infinity})).sort((x,y)=>rateOrder(x.r,y.r));passCache?.timeline.set(c,t);return t}
+function multAt(c,iso){let t=iso?new Date(iso).getTime():-Infinity,m=1;for(const{r,at}of timeline(c)){if(!r.from||at<=t)m=r.multiplier}return m}
 function boundariesSame(){let set=new Set();Object.values(draft.channelRates).forEach(l=>l.forEach(r=>{if(r.from)set.add(new Date(r.from).getTime())}));Object.values(draft.accounts).forEach(o=>{if(o.retiredAt)set.add(new Date(o.retiredAt).getTime())});let a=[...set].sort((x,y)=>x-y),b=data.periodStarts.slice(1).map(s=>new Date(s).getTime());return a.length===b.length&&a.every((v,i)=>v===b[i])}
 let shapeOK=true;
 function revenueOf(a){if(!shapeOK)return a.total.revenue;return(a.periodCost||[]).reduce((s,c,i)=>s+c*multAt(a.channel,data.periodStarts[i]),0)}
-function effective(a){let entered=a.id in draft.accounts,acc=draft.accounts[a.id]||{},b=draft.batches[acc.batch]||null,cost=acc.cost??b?.cost??null,revenue=revenueOf(a);return{retiredAt:acc.retiredAt||'',pending:!entered,batch:b?acc.batch:'',cost,revenue,profit:cost==null?null:revenue-cost,payback:cost>0?revenue/cost:null,inheritCost:b?.cost??null}}
+function effective(a){if(passCache?.eff.has(a.id))return passCache.eff.get(a.id);let e=computeEffective(a);passCache?.eff.set(a.id,e);return e}
+function computeEffective(a){let entered=a.id in draft.accounts,acc=draft.accounts[a.id]||{},b=draft.batches[acc.batch]||null,cost=acc.cost??b?.cost??null,revenue=revenueOf(a);return{retiredAt:acc.retiredAt||'',pending:!entered,batch:b?acc.batch:'',cost,revenue,profit:cost==null?null:revenue-cost,payback:cost>0?revenue/cost:null,inheritCost:b?.cost??null}}
 function localInput(iso){if(!iso||iso==='invalid')return'';let d=new Date(iso),p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
 function markCostsDirty(){dirty.costs=true;setStatus('#costStatus','有未保存的修改','warn')}
 function setField(obj,field,raw){if(field==='cost'){if(raw==='')delete obj.cost;else obj.cost=+raw}else{let v=String(raw).trim();if(v)obj[field]=v;else delete obj[field]}}
@@ -213,22 +218,22 @@ function drawRates(){let{list}=channelsInUse(),chans=list.concat(Object.keys(dra
 $('#rateChannels').innerHTML=chans.map(c=>{let rows=timeline(c),served=data.rates[c]||[],same=served.length===rows.length&&served.every((s,k)=>(s.from?new Date(s.from).getTime():'')===(rows[k].r.from?new Date(rows[k].r.from).getTime():''));
 let body=rows.length?rows.map(({r,i},k)=>{let s=same?served[k]:null;return'<tr data-ch="'+esc(c)+'" data-i="'+i+'"><td class="l">'+(r.from===''?'<b>最早</b><span class="inherit">第一次调价之前</span>':'<input type="datetime-local" data-k="from" value="'+esc(localInput(r.from))+'">')+(s&&s.current?' <span class="tag">当前</span>':'')+'</td><td class="l"><input type="number" min="0" step="any" data-k="multiplier" value="'+r.multiplier+'" style="width:90px"></td><td class="l"><input class="note" data-k="note" value="'+esc(r.note||'')+'" placeholder="如 进货调价"></td><td>'+(s?num(s.requests):'—')+'</td><td>'+(s?money(s.cost):'—')+'</td><td class="r-rev">'+(s?money(s.cost*r.multiplier):'<span class="muted">保存后计算</span>')+'</td><td>'+(r.from===''?'':'<button type="button" class="del-rate">删除</button>')+'</td></tr>'}).join(''):'<tr data-ch="'+esc(c)+'"><td colspan="7" class="empty">未设置，按 ×1 计算</td></tr>';
 let now=data.summary.multipliers?.[c];return'<div class="rate-block"><div class="panel-head"><h3>'+esc(channelName(c))+'</h3><span class="muted">'+(now!=null?'当前 ×'+now:'未设置')+'</span><div class="right"><button type="button" class="add-rate" data-ch="'+esc(c)+'">'+(rows.length?'+ 调价':'设置倍率')+'</button></div></div><div class="scroll"><table class="cost-table"><thead><tr><th class="l">生效时间</th><th class="l">倍率</th><th class="l">备注</th><th>期间请求</th><th>期间等值费用</th><th>期间收入</th><th></th></tr></thead><tbody>'+body+'</tbody></table></div></div>'}).join('')||'<div class="empty">暂无账号</div>'}
-function renderCostRows(){let list=filteredAccounts(data.accounts,costFilter.channel,costFilter.search),f=costFilter.batch;
+function renderCostRows(){beginPass();shapeOK=boundariesSame();let list=filteredAccounts(data.accounts,costFilter.channel,costFilter.search),f=costFilter.batch;
 if(f!=='all')list=list.filter(a=>{let e=effective(a);return f==='pending'?e.pending:f==='none'?!e.pending&&!e.batch:f==='retired'?!!e.retiredAt:f==='active'?!e.retiredAt:e.batch===f});
 list.sort((a,b)=>effective(b).pending-effective(a).pending||b.total.cost-a.total.cost||a.id.localeCompare(b.id));
 $('#costRows').innerHTML=list.length?list.map(a=>{let o=draft.accounts[a.id]||{},e=effective(a);return'<tr data-id="'+esc(a.id)+'"><td class="l"><input type="checkbox" class="pick" style="height:auto"'+(selected.has(a.id)?' checked':'')+'></td><td class="l who" title="'+esc(a.id)+'">'+esc(displayName(a))+'<span class="inherit">'+esc(ago(a.lastUsed))+'</span></td><td class="l">'+retireCell(o)+'</td><td class="l">'+esc(channelName(a.channel))+'</td><td class="l"><select data-k="batch">'+(e.pending?'<option value="__pending" selected>待填写成本</option>':'')+batchOptions(e.batch,'<option value=""'+(!e.pending&&!e.batch?' selected':'')+'>不计成本</option>')+'</select></td><td class="l"><input type="number" min="0" step="any" data-k="cost" value="'+(o.cost??'')+'"></td><td class="l"><input class="note" data-k="note" value="'+esc(o.note||'')+'" placeholder="备注"></td><td>'+money(a.total.cost)+'</td><td class="c-rev"></td><td class="c-profit"></td><td class="l c-pay" style="min-width:110px"></td></tr>'}).join(''):'<tr><td colspan="11" class="empty">没有匹配的账号</td></tr>';
 updateBulk();updateCostCells()}
 function payHTML(cost,payback){return cost==null?'<span class="muted">未设成本</span>':payback==null?'零成本':(payback*100).toFixed(0)+'%<div class="progress"><i class="'+(payback<1?'low':'')+'" style="width:'+Math.min(100,payback*100)+'%"></i></div>'}
 function profitHTML(p){return p==null?'<span class="muted">—</span>':'<span class="'+(p>=0?'pos':'neg')+'">'+money(p,true)+'</span>'}
-function updateCostCells(){shapeOK=boundariesSame();let tot={cost:0,rev:0,profit:0,n:0},per={};
+function updateCostCells(){beginPass();shapeOK=boundariesSame();let tot={cost:0,rev:0,profit:0,n:0},per={};
 data.accounts.forEach(a=>{let e=effective(a);if(!e.batch)return;let s=per[e.batch]??={n:0,cost:0,rev:0,costed:0};s.n++;s.rev+=e.revenue;if(e.cost!=null){s.cost+=e.cost;s.costed++}});
 $$('#batchRows tr[data-batch]').forEach(row=>{let s=per[row.dataset.batch]||{n:0,cost:0,rev:0,costed:0};row.querySelector('.b-n').textContent=s.n;row.querySelector('.b-cost').textContent=money(s.cost);row.querySelector('.b-rev').textContent=money(s.rev);row.querySelector('.b-profit').innerHTML=profitHTML(s.costed?s.rev-s.cost:null);row.querySelector('.b-pay').innerHTML=s.n?payHTML(s.costed?s.cost:null,s.cost>0?s.rev/s.cost:null):'<span class="muted">—</span>'});
-$$('#costRows tr[data-id]').forEach(row=>{let a=data.accounts.find(x=>x.id===row.dataset.id),e=effective(a);
+$$('#costRows tr[data-id]').forEach(row=>{let a=accountById.get(row.dataset.id),e=effective(a);
 row.querySelector('[data-k=cost]').placeholder=e.inheritCost==null?(e.pending?'待填写':'—'):'记录 '+e.inheritCost;
 row.querySelector('.c-rev').textContent=money(e.revenue);row.querySelector('.c-profit').innerHTML=profitHTML(e.profit);row.querySelector('.c-pay').innerHTML=e.pending&&e.cost==null?'<span class="warn">待填写</span>':payHTML(e.cost,e.payback);
 tot.rev+=e.revenue;if(e.cost!=null){tot.cost+=e.cost;tot.profit+=e.profit;tot.n++}});
 $('#costFoot').innerHTML='<tr><th class="l" colspan="8">合计（当前列表，已设成本 '+tot.n+' 个，成本 '+esc(cur(tot.cost))+'）</th><th>'+money(tot.rev)+'</th><th class="'+(tot.profit>=0?'pos':'neg')+'">'+money(tot.profit,true)+'</th><th></th></tr>';
-if(!shapeOK&&dirty.costs)setStatus('#costStatus','调价或下架时间有改动，收入在保存后按请求时间重新计算','warn')}
+if(!shapeOK&&dirty.costs)setStatus('#costStatus','调价或下架时间有改动，收入在保存后按请求时间重新计算','warn');passCache=null}
 function retireCell(o){return o.retiredAt?'<div class="retire"><input type="datetime-local" data-k="retiredAt" value="'+esc(localInput(o.retiredAt))+'"> <button type="button" class="link unretire">恢复</button></div>':'<button type="button" class="retire-now">下架</button>'}
 function updateBulk(){$('#bulkBar').hidden=!selected.size;$('#bulkCount').textContent=selected.size;let boxes=$$('#costRows .pick');$('#checkAll').checked=boxes.length>0&&boxes.every(b=>b.checked)}
 function accountEntry(id){return draft.accounts[id]??={}}
@@ -307,5 +312,5 @@ $('#backupRows').addEventListener('click',async e=>{let b=e.target.closest('.res
 setStatus('#backupStatus','恢复中…');try{await api({backup_restore:b.dataset.name});dirty.costs=dirty.prices=false;await reload(true);renderCosts();renderPrices();setStatus('#backupStatus','已恢复'+what,'ok');loadBackups()}catch(err){setStatus('#backupStatus','恢复失败：'+err.message,'error')}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('#accountDialog').open)closeAccount()});
 if(view.tab==='backup')loadBackups();
-if(data){if(data.range.key!==view.range)reload(true);else render();if(view.open&&data.accounts.some(a=>a.id===view.open))openAccount(view.open)}else reload(true);
+if(data){setData(data);if(data.range.key!==view.range)reload(true);else render();if(view.open&&data.accounts.some(a=>a.id===view.open))openAccount(view.open)}else reload(true);
 </script></body></html>

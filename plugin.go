@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +116,9 @@ var state = struct {
 	rows     map[aggregateKey]*aggregate
 	accounts accountSettings
 	schedule rateSchedule
+	// version changes whenever anything shown on the dashboard changes, so unchanged refreshes can be skipped.
+	version            uint64
+	settingsGeneration uint64
 }{rows: make(map[aggregateKey]*aggregate), location: time.Local, accounts: defaultAccountSettings()}
 
 type hostCaller func(method string, payload []byte) ([]byte, error)
@@ -150,7 +153,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.5.2",
+				"Version":          "1.6.0",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -254,12 +257,34 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			}
 			return jsonResponse(http.StatusOK, map[string]bool{"ok": true})
 		}
+		_, isAPI := query("api")
 		if len(caller) > 0 {
-			refreshAuthChannels(caller[0])
+			// The host lists every credential with its recent requests; the page refreshes every few seconds, so the
+			// list is only re-read on page load or when it is older than authListMaxAge.
+			refreshAuthChannelsIfStale(caller[0], !isAPI)
 		}
 		maybeDailyBackup(time.Now())
 		rangeKey, _ := query("range")
-		if _, ok := query("api"); ok {
+		if _, ok := query("models"); ok {
+			payload := buildDashboard(rangeKey, time.Now(), true)
+			only, _ := query("account")
+			models := make(map[string][]modelView, len(payload.Accounts))
+			for _, account := range payload.Accounts {
+				if only == "" || account.ID == only {
+					models[account.ID] = account.Models
+				}
+			}
+			return jsonResponse(http.StatusOK, map[string]any{"models": models})
+		}
+		if isAPI {
+			if since, ok := query("since"); ok {
+				state.RLock()
+				unchanged := since == fmt.Sprint(state.version)
+				state.RUnlock()
+				if unchanged {
+					return jsonResponse(http.StatusOK, map[string]bool{"unchanged": true})
+				}
+			}
 			return jsonResponse(http.StatusOK, buildDashboard(rangeKey, time.Now()))
 		}
 		body, err := renderDashboardPage(rangeKey, time.Now())
@@ -293,6 +318,25 @@ func authSnapshot() authView {
 	return authView{entries: authInfo.entries, byKey: authInfo.byKey}
 }
 
+const authListMaxAge = 30 * time.Second
+
+var authListed struct {
+	sync.Mutex
+	at time.Time
+}
+
+func refreshAuthChannelsIfStale(caller hostCaller, force bool) {
+	authListed.Lock()
+	fresh := !force && time.Since(authListed.at) < authListMaxAge
+	if !fresh {
+		authListed.at = time.Now()
+	}
+	authListed.Unlock()
+	if !fresh {
+		refreshAuthChannels(caller)
+	}
+}
+
 func refreshAuthChannels(caller hostCaller) {
 	if caller == nil {
 		return
@@ -319,9 +363,16 @@ func refreshAuthChannels(caller hostCaller) {
 		}
 	}
 	authInfo.Lock()
+	changed := !reflect.DeepEqual(authInfo.entries, env.Result.Files)
 	authInfo.entries = env.Result.Files
 	authInfo.byKey = m
 	authInfo.Unlock()
+	if changed {
+		// Bump the dashboard version so pages waiting on an unchanged version pick up the new list.
+		state.Lock()
+		state.version++
+		state.Unlock()
+	}
 }
 
 func applyConfig(raw []byte) error {
@@ -355,7 +406,7 @@ func applyConfig(raw []byte) error {
 	state.Lock()
 	defer state.Unlock()
 	if state.dataFile != path || state.location.String() != location.String() || state.schedule.key() != schedule.key() {
-		rows, errLoad := loadUsage(path, location, schedule)
+		rows, _, errLoad := scanUsage(path, location, schedule, nil, 0, false)
 		if errLoad != nil {
 			return errLoad
 		}
@@ -369,6 +420,8 @@ func applyConfig(raw []byte) error {
 	state.accounts = accounts
 	state.schedule = schedule
 	state.config = cfg
+	state.settingsGeneration++
+	state.version++
 	return nil
 }
 
@@ -403,6 +456,7 @@ func updatePrices(raw string) error {
 		return fmt.Errorf("save prices: %w", err)
 	}
 	state.config.Prices = prices
+	state.version++
 	return nil
 }
 
@@ -543,35 +597,8 @@ func recordUsage(record usageRecord) error {
 		return fmt.Errorf("append usage data: %w", errWrite)
 	}
 	addUsage(state.rows, item, state.location, state.schedule)
+	state.version++
 	return nil
-}
-
-func loadUsage(path string, location *time.Location, schedule rateSchedule) (map[aggregateKey]*aggregate, error) {
-	rows := make(map[aggregateKey]*aggregate)
-	file, errOpen := os.Open(path)
-	if os.IsNotExist(errOpen) {
-		return rows, nil
-	}
-	if errOpen != nil {
-		return nil, fmt.Errorf("open usage data file: %w", errOpen)
-	}
-	defer func() { _ = file.Close() }()
-	scanner := bufio.NewScanner(file)
-	buffer := make([]byte, 64*1024)
-	scanner.Buffer(buffer, 1024*1024)
-	line := 0
-	for scanner.Scan() {
-		line++
-		var item storedUsage
-		if err := json.Unmarshal(scanner.Bytes(), &item); err != nil {
-			return nil, fmt.Errorf("decode usage data line %d: %w", line, err)
-		}
-		addUsage(rows, item, location, schedule)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read usage data: %w", err)
-	}
-	return rows, nil
 }
 
 func addUsage(rows map[aggregateKey]*aggregate, item storedUsage, location *time.Location, schedule rateSchedule) {

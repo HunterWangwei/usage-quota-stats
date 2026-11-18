@@ -109,6 +109,8 @@ plugins:
 
 从完整备份恢复：停止 CLIProxyAPI，把 zip 里的文件解压到 `data-file` 所在目录覆盖，再启动即可。
 
+页面每 5 秒自动刷新一次，数据没有变化时只传输几十字节。建议保持 CLIProxyAPI 的 `response-compression.enabled: true`（默认开启），页面数据会被压缩传输，远程访问时打开更快。
+
 ## 时区
 
 按天统计默认使用服务器时区。Docker 容器通常是 UTC，可以在配置中指定：

@@ -53,7 +53,7 @@ type accountView struct {
 	LastUsed      *time.Time  `json:"lastUsed"`
 	Range         usageStats  `json:"range"`
 	Total         usageStats  `json:"total"`
-	Models        []modelView `json:"models"`
+	Models        []modelView `json:"models,omitempty"`
 	Cost          *float64    `json:"cost"`
 	CostSource    string      `json:"costSource"`
 	Profit        *float64    `json:"profit"`
@@ -117,6 +117,7 @@ type dashboardPayload struct {
 	Prices       []priceView           `json:"prices"`
 	Unpriced     []unpricedRow         `json:"unpriced"`
 	Settings     accountSettings       `json:"settings"`
+	Version      uint64                `json:"version"`      // changes whenever the data shown here changes
 	Rates        map[string][]rateView `json:"rates"`        // per channel
 	PeriodStarts []string              `json:"periodStarts"` // start of each bucket in accountView.PeriodCost (empty for the first)
 }
@@ -163,8 +164,12 @@ func (s *usageStats) add(item aggregate, regularInput int64, cost, multiplier fl
 	}
 }
 
-func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
+// buildDashboard summarizes usage for the range. Per-model details are only included with includeModels; the
+// page loads them on demand because they make up most of the payload.
+func buildDashboard(rangeKey string, now time.Time, includeModels ...bool) dashboardPayload {
+	withModels := len(includeModels) > 0 && includeModels[0]
 	state.RLock()
+	version := state.version
 	cfg := state.config
 	location := state.location
 	dataFile := state.dataFile
@@ -179,6 +184,7 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 	now = now.In(location)
 	window := resolveRange(rangeKey, now)
 	payload := dashboardPayload{
+		Version:  version,
 		Currency: cfg.Currency, Timezone: location.String(), Today: window.To, GeneratedAt: now, DataFile: dataFile,
 		Range: window, Settings: settings,
 	}
@@ -298,8 +304,13 @@ func buildDashboard(rangeKey string, now time.Time) dashboardPayload {
 	}
 
 	for id, view := range accounts {
-		view.Models = []modelView{}
+		if withModels {
+			view.Models = []modelView{}
+		}
 		for _, model := range models[id] {
+			if !withModels {
+				break
+			}
 			view.Models = append(view.Models, *model)
 		}
 		sort.Slice(view.Models, func(i, j int) bool {

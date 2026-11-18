@@ -239,9 +239,10 @@ func restoreSettingsBackup(name string) error {
 	if !backupNamePattern.MatchString(name) || !(strings.HasPrefix(name, "accounts-") || strings.HasPrefix(name, "prices-")) {
 		return fmt.Errorf("只能恢复成本或价格设置的备份")
 	}
-	state.Lock()
-	defer state.Unlock()
-	data, err := os.ReadFile(filepath.Join(backupDirFor(state.dataFile), name))
+	state.RLock()
+	dir, dataFile := backupDirFor(state.dataFile), state.dataFile
+	state.RUnlock()
+	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		return fmt.Errorf("读取备份失败：%w", err)
 	}
@@ -254,20 +255,25 @@ func restoreSettingsBackup(name string) error {
 		if err := json.Unmarshal(data, &prices); err != nil {
 			return fmt.Errorf("备份文件已损坏：%w", err)
 		}
+		state.Lock()
+		defer state.Unlock()
 		versionSettingsLocked("prices")
 		if err := os.WriteFile(state.dataFile+".prices.json", data, 0o600); err != nil {
 			return err
 		}
 		state.config.Prices = prices
+		state.version++
 		return nil
 	}
-	temp := state.dataFile + ".accounts.restore.tmp"
+	temp := dataFile + ".accounts.restore.tmp"
 	if err := os.WriteFile(temp, data, 0o600); err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(temp) }()
-	settings, schedule := loadAccountSettings(temp, state.location)
-	return commitAccountSettingsLocked(settings, schedule)
+	return applySettingsChange(func() (accountSettings, rateSchedule, error) {
+		settings, schedule := loadAccountSettings(temp, state.location)
+		return settings, schedule, nil
+	})
 }
 
 func fileExists(path string) bool {
