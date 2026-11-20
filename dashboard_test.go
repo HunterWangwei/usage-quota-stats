@@ -358,3 +358,33 @@ func TestUnpricedVariantsGroupedByBase(t *testing.T) {
 		t.Fatalf("after pricing base: unpriced %#v, matches %#v", p.Unpriced, p.Prices[0].Matches)
 	}
 }
+
+func TestAddedTimeKeepsEarliestAndSurvivesReload(t *testing.T) {
+	day := func(d int) time.Time { return time.Date(2026, 11, d, 12, 0, 0, 0, time.UTC) }
+	path := setupDashboard(t, "", use("codex", "old.json", day(3)), use("codex", "old.json", day(1)))
+	// Listed by the host with a file time after its first request: the first request wins.
+	authInfo.Lock()
+	authInfo.entries = nil
+	authInfo.Unlock()
+	noteListedAccounts([]authFileEntry{{ID: "old.json", CreatedAt: day(5)}, {ID: "new.json", CreatedAt: day(10)}})
+	p := buildDashboard("all", day(20))
+	if a := findAccount(t, p, "old.json"); a.AddedAt == nil || !a.AddedAt.Equal(day(1)) {
+		t.Fatalf("old added = %v", a.AddedAt)
+	}
+	// A later token refresh rewrites the file; the added time must not move.
+	noteListedAccounts([]authFileEntry{{ID: "new.json", CreatedAt: day(15)}})
+	if got := state.seen["new.json"]; !got.Equal(day(10)) {
+		t.Fatalf("new added = %v", got)
+	}
+	if err := applyConfig([]byte("data-file: " + path + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := state.seen["new.json"]; !got.Equal(day(10)) || !state.seen["old.json"].Equal(day(1)) {
+		t.Fatalf("after reload = %v", state.seen)
+	}
+	// A credential first seen through a request gets that request's time.
+	recordAll(t, use("codex", "fresh.json", day(18)))
+	if got := state.seen["fresh.json"]; !got.Equal(day(18)) {
+		t.Fatalf("fresh added = %v", got)
+	}
+}

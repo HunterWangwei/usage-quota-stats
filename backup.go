@@ -44,7 +44,7 @@ func backupDirFor(dataFile string) string {
 }
 
 func settingsFiles(dataFile string) map[string]string {
-	return map[string]string{"accounts": dataFile + ".accounts.json", "prices": dataFile + ".prices.json"}
+	return map[string]string{"accounts": dataFile + ".accounts.json", "prices": dataFile + ".prices.json", "seen": seenFile(dataFile)}
 }
 
 // versionSettingsLocked copies a settings file into the backup directory before it is overwritten. The caller

@@ -105,6 +105,7 @@ type aggregate struct {
 	OutputTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+	FirstUsed           time.Time
 	LastUsed            time.Time
 }
 
@@ -119,22 +120,24 @@ var state = struct {
 	// version changes whenever anything shown on the dashboard changes, so unchanged refreshes can be skipped.
 	version            uint64
 	settingsGeneration uint64
-}{rows: make(map[aggregateKey]*aggregate), location: time.Local, accounts: defaultAccountSettings()}
+	seen               map[string]time.Time // credential ID -> added time, see seen.go
+}{seen: make(map[string]time.Time), rows: make(map[aggregateKey]*aggregate), location: time.Local, accounts: defaultAccountSettings()}
 
 type hostCaller func(method string, payload []byte) ([]byte, error)
 
 type authFileEntry struct {
-	ID            string `json:"id"`
-	AuthIndex     string `json:"auth_index"`
-	Name          string `json:"name"`
-	Type          string `json:"type"`
-	Provider      string `json:"provider"`
-	Label         string `json:"label"`
-	Email         string `json:"email"`
-	Status        string `json:"status"`
-	StatusMessage string `json:"status_message"`
-	Disabled      bool   `json:"disabled"`
-	Unavailable   bool   `json:"unavailable"`
+	ID            string    `json:"id"`
+	AuthIndex     string    `json:"auth_index"`
+	Name          string    `json:"name"`
+	Type          string    `json:"type"`
+	Provider      string    `json:"provider"`
+	Label         string    `json:"label"`
+	Email         string    `json:"email"`
+	Status        string    `json:"status"`
+	StatusMessage string    `json:"status_message"`
+	Disabled      bool      `json:"disabled"`
+	Unavailable   bool      `json:"unavailable"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, error) {
@@ -153,7 +156,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.6.1",
+				"Version":          "1.7.0",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -367,6 +370,7 @@ func refreshAuthChannels(caller hostCaller) {
 	authInfo.entries = env.Result.Files
 	authInfo.byKey = m
 	authInfo.Unlock()
+	noteListedAccounts(env.Result.Files)
 	if changed {
 		// Bump the dashboard version so pages waiting on an unchanged version pick up the new list.
 		state.Lock()
@@ -418,6 +422,8 @@ func applyConfig(raw []byte) error {
 		_ = json.Unmarshal(saved, &cfg.Prices)
 	}
 	state.accounts = accounts
+	state.seen = loadSeen(seenFile(path))
+	backfillSeenLocked()
 	state.schedule = schedule
 	state.config = cfg
 	state.settingsGeneration++
@@ -597,6 +603,9 @@ func recordUsage(record usageRecord) error {
 		return fmt.Errorf("append usage data: %w", errWrite)
 	}
 	addUsage(state.rows, item, state.location, state.schedule)
+	if _, known := state.seen[authID]; !known && noteSeenLocked(authID, requestedAt) {
+		saveSeenLocked()
+	}
 	state.version++
 	return nil
 }
@@ -621,6 +630,9 @@ func addUsage(rows map[aggregateKey]*aggregate, item storedUsage, location *time
 	}
 	if item.RequestedAt.After(row.LastUsed) {
 		row.LastUsed = item.RequestedAt
+	}
+	if !item.RequestedAt.IsZero() && (row.FirstUsed.IsZero() || item.RequestedAt.Before(row.FirstUsed)) {
+		row.FirstUsed = item.RequestedAt
 	}
 	if item.Failed {
 		row.Failures++

@@ -52,6 +52,7 @@ type accountView struct {
 	Unavailable   bool        `json:"unavailable"`
 	Listed        bool        `json:"listed"`
 	LastUsed      *time.Time  `json:"lastUsed"`
+	AddedAt       *time.Time  `json:"addedAt"` // first time the plugin saw the credential
 	Range         usageStats  `json:"range"`
 	Total         usageStats  `json:"total"`
 	Models        []modelView `json:"models,omitempty"`
@@ -178,6 +179,10 @@ func buildDashboard(rangeKey string, now time.Time, includeModels ...bool) dashb
 	location := state.location
 	dataFile := state.dataFile
 	settings := state.accounts
+	seen := make(map[string]time.Time, len(state.seen))
+	for id, at := range state.seen {
+		seen[id] = at
+	}
 	schedule := state.schedule
 	aggregates := make([]aggregate, 0, len(state.rows))
 	for _, row := range state.rows {
@@ -208,6 +213,10 @@ func buildDashboard(rangeKey string, now time.Time, includeModels ...bool) dashb
 			view = &accountView{ID: id, Channel: channelForAuth(provider, authType, id)}
 			if entry, ok := auths.byKey[id]; ok {
 				applyAuthEntry(view, entry)
+			}
+			if at, ok := seen[id]; ok {
+				added := at.In(location)
+				view.AddedAt = &added
 			}
 			terms := settings.effectiveAccount(id)
 			view.Batch, view.BatchName, view.Note = terms.Batch, terms.BatchName, terms.Note
@@ -249,6 +258,10 @@ func buildDashboard(rangeKey string, now time.Time, includeModels ...bool) dashb
 		}
 		if priced && !afterRetired && item.Period < len(view.PeriodCost) {
 			view.PeriodCost[item.Period] += cost
+		}
+		if !item.FirstUsed.IsZero() && (view.AddedAt == nil || item.FirstUsed.Before(*view.AddedAt)) {
+			first := item.FirstUsed.In(location)
+			view.AddedAt = &first
 		}
 		if !item.LastUsed.IsZero() && (view.LastUsed == nil || item.LastUsed.After(*view.LastUsed)) {
 			lastUsed := item.LastUsed.In(location)

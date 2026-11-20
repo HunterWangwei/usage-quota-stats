@@ -140,6 +140,9 @@ func mergeRows(dst, src map[aggregateKey]*aggregate) {
 		if row.LastUsed.After(existing.LastUsed) {
 			existing.LastUsed = row.LastUsed
 		}
+		if !row.FirstUsed.IsZero() && (existing.FirstUsed.IsZero() || row.FirstUsed.Before(existing.FirstUsed)) {
+			existing.FirstUsed = row.FirstUsed
+		}
 		existing.Requests += row.Requests
 		existing.Failures += row.Failures
 		existing.InputTokens += row.InputTokens
