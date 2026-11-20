@@ -153,7 +153,7 @@ func handleMethod(method string, request []byte, caller ...hostCaller) ([]byte, 
 			"schema_version": 1,
 			"metadata": map[string]any{
 				"Name":             "配置额度统计",
-				"Version":          "1.6.0",
+				"Version":          "1.6.1",
 				"Author":           "CLIProxyAPI",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
@@ -641,10 +641,42 @@ func lookupPrice(prices map[string]modelPrices, model string) (modelPrices, bool
 	return prices[pattern], true
 }
 
-// matchPattern returns the price rule key used for model: an exact name wins, otherwise the longest "prefix*" rule.
+// thinkingLevels are the reasoning-effort suffixes CLIProxyAPI and Antigravity put on model names, as
+// "model-high" or "model(high)". They do not change the per-token price. Suffixes such as "-max" or "-tiered"
+// name distinct models and are deliberately not listed.
+var thinkingLevels = []string{"medium", "high", "low", "xhigh", "minimal"}
+
+// thinkingBase strips a thinking-level suffix: "gemini-3.8-flash-high" and "gemini-3.8-flash(8192)" both
+// become "gemini-3.8-flash".
+func thinkingBase(model string) (string, bool) {
+	if open := strings.LastIndex(model, "("); open > 0 && strings.HasSuffix(model, ")") {
+		return model[:open], true
+	}
+	lower := strings.ToLower(model)
+	for _, level := range thinkingLevels {
+		if strings.HasSuffix(lower, "-"+level) && len(model) > len(level)+1 {
+			return model[:len(model)-len(level)-1], true
+		}
+	}
+	return model, false
+}
+
+// matchPattern returns the price rule key used for model, trying in order: the exact name; the name without its
+// thinking level; a rule for the same model at another thinking level; the longest "prefix*" rule.
 func matchPattern(prices map[string]modelPrices, model string) (string, bool) {
 	if _, ok := prices[model]; ok {
 		return model, true
+	}
+	base, _ := thinkingBase(model)
+	if _, ok := prices[base]; ok && base != model {
+		return base, true
+	}
+	for _, level := range thinkingLevels {
+		for _, sibling := range []string{base + "-" + level, base + "(" + level + ")"} {
+			if _, ok := prices[sibling]; ok && sibling != model {
+				return sibling, true
+			}
+		}
 	}
 	best, bestPrefix := "", ""
 	for pattern := range prices {

@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -98,10 +99,13 @@ type priceView struct {
 	Matches []priceMatch `json:"matches"`
 }
 
+// unpricedRow groups the thinking-level variants of one model (gemini-3.8-flash-low/-medium/-high): a single
+// rule for the base name prices all of them.
 type unpricedRow struct {
-	Model    string `json:"model"`
-	Requests int64  `json:"requests"`
-	Tokens   int64  `json:"tokens"`
+	Model    string   `json:"model"`
+	Variants []string `json:"variants"`
+	Requests int64    `json:"requests"`
+	Tokens   int64    `json:"tokens"`
 }
 
 type dashboardPayload struct {
@@ -257,10 +261,14 @@ func buildDashboard(rangeKey string, now time.Time, includeModels ...bool) dashb
 				}
 				matches[pattern][item.Model] += item.Requests
 			} else {
-				row := unpriced[item.Model]
+				base, _ := thinkingBase(item.Model)
+				row := unpriced[base]
 				if row == nil {
-					row = &unpricedRow{Model: item.Model}
-					unpriced[item.Model] = row
+					row = &unpricedRow{Model: base}
+					unpriced[base] = row
+				}
+				if !slices.Contains(row.Variants, item.Model) {
+					row.Variants = append(row.Variants, item.Model)
 				}
 				row.Requests += item.Requests
 				row.Tokens += item.InputTokens + item.OutputTokens + item.CacheReadTokens + item.CacheCreationTokens
@@ -386,6 +394,7 @@ func buildDashboard(rangeKey string, now time.Time, includeModels ...bool) dashb
 		payload.Prices = append(payload.Prices, view)
 	}
 	for _, row := range unpriced {
+		sort.Strings(row.Variants)
 		payload.Unpriced = append(payload.Unpriced, *row)
 	}
 	sort.Slice(payload.Unpriced, func(i, j int) bool {

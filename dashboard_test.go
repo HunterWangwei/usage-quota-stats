@@ -338,3 +338,23 @@ func TestRefreshSkipsUnchangedAndModelsOnDemand(t *testing.T) {
 		t.Fatalf("models = %s", body)
 	}
 }
+
+func TestUnpricedVariantsGroupedByBase(t *testing.T) {
+	now := time.Now()
+	setupDashboard(t, "",
+		usageRecord{Model: "gemini-3.8-flash-high", AuthID: "a", RequestedAt: now},
+		usageRecord{Model: "gemini-3.8-flash-low", AuthID: "a", RequestedAt: now},
+		usageRecord{Model: "gemini-3.8-flash-tiered", AuthID: "a", RequestedAt: now},
+	)
+	p := buildDashboard("all", now)
+	if len(p.Unpriced) != 2 || p.Unpriced[0].Model != "gemini-3.8-flash" || p.Unpriced[0].Requests != 2 || strings.Join(p.Unpriced[0].Variants, ",") != "gemini-3.8-flash-high,gemini-3.8-flash-low" {
+		t.Fatalf("unpriced = %#v", p.Unpriced)
+	}
+	if err := updatePrices(`{"gemini-3.8-flash":{"input":1}}`); err != nil {
+		t.Fatal(err)
+	}
+	p = buildDashboard("all", now)
+	if len(p.Unpriced) != 1 || p.Unpriced[0].Model != "gemini-3.8-flash-tiered" || len(p.Prices[0].Matches) != 2 {
+		t.Fatalf("after pricing base: unpriced %#v, matches %#v", p.Unpriced, p.Prices[0].Matches)
+	}
+}

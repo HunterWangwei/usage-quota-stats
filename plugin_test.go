@@ -81,3 +81,31 @@ func TestUpdatePricesRejectsNegativeAndDropsBlankModels(t *testing.T) {
 		t.Fatalf("prices = %#v", state.config.Prices)
 	}
 }
+
+func TestThinkingLevelVariantsShareOnePrice(t *testing.T) {
+	// A rule set for one variant (as created from the unpriced list) prices its siblings too.
+	medium := map[string]modelPrices{"gemini-3.8-flash-medium": {Input: 0.3}, "gemini-3.8-flash-tiered": {Input: 9}}
+	for _, model := range []string{"gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash", "gemini-3.8-flash(high)", "gemini-3.8-flash(8192)", "gemini-3.8-flash-xhigh"} {
+		if got, ok := lookupPrice(medium, model); !ok || got.Input != 0.3 {
+			t.Fatalf("%s = %#v, %t", model, got, ok)
+		}
+	}
+	// A rule for the base name prices every level; distinct models are not mixed up.
+	base := map[string]modelPrices{"gemini-3.8-flash": {Input: 0.3}, "gemini-3.8-flash-lite": {Input: 0.1}}
+	for model, want := range map[string]float64{"gemini-3.8-flash-high": 0.3, "gemini-3.8-flash-low": 0.3, "gemini-3.8-flash-lite": 0.1, "gemini-3.8-flash-lite-high": 0.1} {
+		if got, ok := lookupPrice(base, model); !ok || got.Input != want {
+			t.Fatalf("%s = %#v, %t, want %v", model, got, ok, want)
+		}
+	}
+	if _, ok := lookupPrice(base, "gemini-3.8-flash-tiered"); ok {
+		t.Fatal("-tiered is a different model and must stay unpriced")
+	}
+	// An exact rule for one level still wins over the shared price.
+	mixed := map[string]modelPrices{"gemini-3.8-flash": {Input: 0.3}, "gemini-3.8-flash-high": {Input: 0.5}}
+	if got, _ := lookupPrice(mixed, "gemini-3.8-flash-high"); got.Input != 0.5 {
+		t.Fatalf("exact level rule = %v", got.Input)
+	}
+	if got, _ := lookupPrice(mixed, "gemini-3.8-flash-low"); got.Input != 0.3 {
+		t.Fatalf("base rule = %v", got.Input)
+	}
+}
